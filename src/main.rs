@@ -22,6 +22,89 @@ use cli::Cli;
 use kubernetes::{get_selector_from_resource, spawn_tail_tasks_for_pod};
 use types::LogMessage;
 
+fn parse_labels(sel_str: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in sel_str.split(',') {
+        let pair = pair.trim();
+        if let Some(eq_pos) = pair.find('=') {
+            let key = pair[..eq_pos].to_string();
+            let value = pair[eq_pos + 1..].to_string();
+            map.insert(key, value);
+        }
+    }
+    map
+}
+
+fn selector_to_labels_string(selector: &LabelSelector) -> Option<String> {
+    if let Some(labels) = &selector.match_labels {
+        if labels.is_empty() {
+            None
+        } else {
+            Some(
+                labels
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        }
+    } else {
+        None
+    }
+}
+
+fn matches_selector(
+    pod_labels: &std::collections::BTreeMap<String, String>,
+    selector: &LabelSelector,
+) -> bool {
+    // Check match_labels
+    if let Some(match_labels) = &selector.match_labels {
+        for (key, value) in match_labels {
+            if pod_labels.get(key) != Some(value) {
+                return false;
+            }
+        }
+    }
+    // Check match_expressions
+    if let Some(expressions) = &selector.match_expressions {
+        for expr in expressions {
+            let pod_value = pod_labels.get(&expr.key);
+            match expr.operator.as_str() {
+                "In" => {
+                    if let Some(values) = &expr.values {
+                        if pod_value.is_none() || !values.contains(pod_value.unwrap()) {
+                            return false;
+                        }
+                    } else {
+                        return false; // No values for In
+                    }
+                }
+                "NotIn" => {
+                    if let Some(values) = &expr.values {
+                        if pod_value.is_some() && values.contains(pod_value.unwrap()) {
+                            return false;
+                        }
+                    } else {
+                        return false; // No values for NotIn
+                    }
+                }
+                "Exists" => {
+                    if pod_value.is_none() {
+                        return false;
+                    }
+                }
+                "DoesNotExist" => {
+                    if pod_value.is_some() {
+                        return false;
+                    }
+                }
+                _ => return false, // Unknown operator
+            }
+        }
+    }
+    true
+}
+
 fn get_color(s: &str) -> Color {
     let colors = [
         Color::Red,
@@ -77,6 +160,108 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
         assert_eq!(cli.container, Some("app".to_string()));
     }
+
+    #[test]
+    fn test_cli_parsing_multiple_resources() {
+        let args = vec!["kubectl-tail", "deployment/app1", "pod/my-pod"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(
+            cli.resources,
+            vec!["deployment/app1".to_string(), "pod/my-pod".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cli_parsing_tail() {
+        let args = vec!["kubectl-tail", "pod/my-pod", "--tail", "10"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.tail, Some(10));
+    }
+
+    #[test]
+    fn test_cli_parsing_verbose() {
+        let args = vec!["kubectl-tail", "pod/my-pod", "-v"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(cli.verbose);
+    }
+
+    #[test]
+    fn test_parse_labels() {
+        let result = parse_labels("app=nginx,version=v1");
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("app".to_string(), "nginx".to_string());
+        expected.insert("version".to_string(), "v1".to_string());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_selector_to_labels_string() {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("app".to_string(), "nginx".to_string());
+        labels.insert("version".to_string(), "v1".to_string());
+        let selector = LabelSelector {
+            match_labels: Some(labels),
+            match_expressions: None,
+        };
+        let result = selector_to_labels_string(&selector);
+        assert_eq!(result, Some("app=nginx,version=v1".to_string()));
+    }
+
+    #[test]
+    fn test_matches_selector_labels() {
+        let mut pod_labels = std::collections::BTreeMap::new();
+        pod_labels.insert("app".to_string(), "nginx".to_string());
+        pod_labels.insert("version".to_string(), "v1".to_string());
+
+        let mut sel_labels = std::collections::BTreeMap::new();
+        sel_labels.insert("app".to_string(), "nginx".to_string());
+        let selector = LabelSelector {
+            match_labels: Some(sel_labels),
+            match_expressions: None,
+        };
+
+        assert!(matches_selector(&pod_labels, &selector));
+    }
+
+    #[test]
+    fn test_matches_selector_expressions_in() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
+
+        let mut pod_labels = std::collections::BTreeMap::new();
+        pod_labels.insert("env".to_string(), "prod".to_string());
+
+        let expr = LabelSelectorRequirement {
+            key: "env".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["prod".to_string(), "dev".to_string()]),
+        };
+        let selector = LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![expr]),
+        };
+
+        assert!(matches_selector(&pod_labels, &selector));
+    }
+
+    #[test]
+    fn test_matches_selector_expressions_exists() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
+
+        let mut pod_labels = std::collections::BTreeMap::new();
+        pod_labels.insert("app".to_string(), "nginx".to_string());
+
+        let expr = LabelSelectorRequirement {
+            key: "app".to_string(),
+            operator: "Exists".to_string(),
+            values: None,
+        };
+        let selector = LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![expr]),
+        };
+
+        assert!(matches_selector(&pod_labels, &selector));
+    }
 }
 
 #[tokio::main]
@@ -122,7 +307,11 @@ async fn main() -> anyhow::Result<()> {
             if let Some(sel) = get_selector_from_resource(&client, typ, name, &namespace).await? {
                 all_selectors.push(sel.clone());
                 let labels_str = selector_to_labels_string(&sel);
-                let lp = if let Some(s) = labels_str { ListParams::default().labels(&s) } else { ListParams::default() };
+                let lp = if let Some(s) = labels_str {
+                    ListParams::default().labels(&s)
+                } else {
+                    ListParams::default()
+                };
                 let pods = pods_api.list(&lp).await?;
                 for p in pods {
                     if p.status.as_ref().and_then(|s| s.phase.as_ref())
@@ -173,7 +362,13 @@ async fn main() -> anyhow::Result<()> {
             if labels.is_empty() {
                 None
             } else {
-                Some(labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(","))
+                Some(
+                    labels
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
             }
         } else {
             None
