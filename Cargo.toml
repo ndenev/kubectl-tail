@@ -1,7 +1,8 @@
 [package]
 name = "kubectl-tail"
 version = "0.1.0"
-edition = "2021"
+authors = ["Nikolay Denev <ndenev@gmail.com>"]
+edition = "2024"
 
 [dependencies]
 kube = { version = "0.95", features = ["runtime", "derive"] }
