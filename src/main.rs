@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
             namespace.to_string(),
             cli.container.clone(),
             tx.clone(),
+            cli.tail,
         )
         .await;
         handles.insert(name.clone(), pod_handles);
@@ -171,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
                             namespace.to_string(),
                             cli.container.clone(),
                             tx.clone(),
+                            cli.tail,
                         )
                         .await;
                         handles.insert(name.clone(), pod_handles);
@@ -200,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
                             namespace.to_string(),
                             cli.container.clone(),
                             tx.clone(),
+                            cli.tail,
                         )
                         .await;
                         handles.insert(name.clone(), pod_handles);

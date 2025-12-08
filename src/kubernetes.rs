@@ -1,4 +1,6 @@
 use crate::types::LogMessage;
+use futures::io::AsyncBufReadExt;
+use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::{Api, Client, api::LogParams};
@@ -125,9 +127,10 @@ pub async fn spawn_tail_tasks_for_pod(
     namespace: String,
     container: Option<String>,
     tx: mpsc::Sender<LogMessage>,
+    tail: u32,
 ) -> Vec<AbortHandle> {
     if let Some(cont) = container {
-        vec![spawn_tail_task(client, pod_name, namespace, cont, tx)]
+        vec![spawn_tail_task(client, pod_name, namespace, cont, tx, tail)]
     } else {
         // Fetch pod to get container names
         let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
@@ -142,6 +145,7 @@ pub async fn spawn_tail_tasks_for_pod(
                             namespace.clone(),
                             c.name.clone(),
                             tx.clone(),
+                            tail,
                         );
                         handles.push(handle);
                     }
@@ -162,31 +166,58 @@ pub fn spawn_tail_task(
     namespace: String,
     container_name: String,
     tx: mpsc::Sender<LogMessage>,
+    tail: u32,
 ) -> AbortHandle {
     let api: Api<Pod> = Api::namespaced(client, &namespace);
 
     let handle = tokio::spawn(async move {
-        let lp = LogParams {
+        let _lp = LogParams {
             follow: true,
             container: Some(container_name.clone()),
+            tail_lines: None,
             ..Default::default()
         };
 
-        match api.logs(&pod_name, &lp).await {
-            Ok(logs) => {
-                for line in logs.lines() {
-                    let msg = LogMessage {
-                        pod_name: pod_name.clone(),
-                        container_name: container_name.clone(),
-                        line: line.to_string(),
-                    };
-                    if tx.send(msg).await.is_err() {
-                        break;
+        eprintln!(
+            "Starting to tail logs for pod {}/{} in namespace {}",
+            pod_name, container_name, namespace
+        );
+        // Follow logs with tail
+        let lp_follow = LogParams {
+            follow: true,
+            container: Some(container_name.clone()),
+            tail_lines: if tail > 0 { Some(tail as i64) } else { None },
+            ..Default::default()
+        };
+        match api.log_stream(&pod_name, &lp_follow).await {
+            Ok(stream) => {
+                let mut line_stream = stream.lines();
+                while let Some(line_result) = line_stream.next().await {
+                    match line_result {
+                        Ok(line) => {
+                            let msg = LogMessage {
+                                pod_name: pod_name.clone(),
+                                container_name: container_name.clone(),
+                                line,
+                            };
+                            if tx.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Error reading follow log line from pod {}/{}: {}",
+                                pod_name, container_name, e
+                            );
+                        }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to get logs for {}: {}", pod_name, e);
+                eprintln!(
+                    "Failed to get follow log stream for pod {}/{}: {}",
+                    pod_name, container_name, e
+                );
             }
         }
     });
