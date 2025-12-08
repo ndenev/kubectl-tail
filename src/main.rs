@@ -1,9 +1,12 @@
 mod cli;
 mod kubernetes;
+#[cfg(test)]
+mod tests;
 mod types;
+mod utils;
 
 use clap::Parser;
-use crossterm::style::{Color, Stylize};
+use crossterm::style::Stylize;
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
@@ -13,7 +16,6 @@ use kube::{
     config,
 };
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -21,248 +23,7 @@ use tokio::task::AbortHandle;
 use cli::Cli;
 use kubernetes::{get_selector_from_resource, spawn_tail_tasks_for_pod};
 use types::LogMessage;
-
-fn parse_labels(sel_str: &str) -> std::collections::BTreeMap<String, String> {
-    let mut map = std::collections::BTreeMap::new();
-    for pair in sel_str.split(',') {
-        let pair = pair.trim();
-        if let Some(eq_pos) = pair.find('=') {
-            let key = pair[..eq_pos].to_string();
-            let value = pair[eq_pos + 1..].to_string();
-            map.insert(key, value);
-        }
-    }
-    map
-}
-
-fn selector_to_labels_string(selector: &LabelSelector) -> Option<String> {
-    if let Some(labels) = &selector.match_labels {
-        if labels.is_empty() {
-            None
-        } else {
-            Some(
-                labels
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )
-        }
-    } else {
-        None
-    }
-}
-
-fn matches_selector(
-    pod_labels: &std::collections::BTreeMap<String, String>,
-    selector: &LabelSelector,
-) -> bool {
-    // Check match_labels
-    if let Some(match_labels) = &selector.match_labels {
-        for (key, value) in match_labels {
-            if pod_labels.get(key) != Some(value) {
-                return false;
-            }
-        }
-    }
-    // Check match_expressions
-    if let Some(expressions) = &selector.match_expressions {
-        for expr in expressions {
-            let pod_value = pod_labels.get(&expr.key);
-            match expr.operator.as_str() {
-                "In" => {
-                    if let Some(values) = &expr.values {
-                        if pod_value.is_none() || !values.contains(pod_value.unwrap()) {
-                            return false;
-                        }
-                    } else {
-                        return false; // No values for In
-                    }
-                }
-                "NotIn" => {
-                    if let Some(values) = &expr.values {
-                        if pod_value.is_some() && values.contains(pod_value.unwrap()) {
-                            return false;
-                        }
-                    } else {
-                        return false; // No values for NotIn
-                    }
-                }
-                "Exists" => {
-                    if pod_value.is_none() {
-                        return false;
-                    }
-                }
-                "DoesNotExist" => {
-                    if pod_value.is_some() {
-                        return false;
-                    }
-                }
-                _ => return false, // Unknown operator
-            }
-        }
-    }
-    true
-}
-
-fn get_color(s: &str) -> Color {
-    let colors = [
-        Color::Red,
-        Color::Green,
-        Color::Blue,
-        Color::Yellow,
-        Color::Magenta,
-        Color::Cyan,
-        Color::White,
-        Color::Grey,
-        Color::AnsiValue(91), // Bright Red
-        Color::AnsiValue(92), // Bright Green
-        Color::AnsiValue(94), // Bright Blue
-        Color::AnsiValue(93), // Bright Yellow
-        Color::AnsiValue(95), // Bright Magenta
-        Color::AnsiValue(96), // Bright Cyan
-    ];
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    colors[(hash % colors.len() as u32) as usize]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cli_parsing_deployment() {
-        let args = vec!["kubectl-tail", "deployment/my-deployment"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.resources, vec!["deployment/my-deployment".to_string()]);
-        assert!(cli.selector.is_none());
-    }
-
-    #[test]
-    fn test_cli_parsing_pod() {
-        let args = vec!["kubectl-tail", "my-pod"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.resources, vec!["my-pod".to_string()]);
-    }
-
-    #[test]
-    fn test_cli_parsing_labels() {
-        let args = vec!["kubectl-tail", "-l", "app=nginx"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.selector, Some("app=nginx".to_string()));
-    }
-
-    #[test]
-    fn test_cli_parsing_container() {
-        let args = vec!["kubectl-tail", "my-pod", "-c", "app"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.container, Some("app".to_string()));
-    }
-
-    #[test]
-    fn test_cli_parsing_multiple_resources() {
-        let args = vec!["kubectl-tail", "deployment/app1", "pod/my-pod"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(
-            cli.resources,
-            vec!["deployment/app1".to_string(), "pod/my-pod".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_cli_parsing_tail() {
-        let args = vec!["kubectl-tail", "pod/my-pod", "--tail", "10"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.tail, Some(10));
-    }
-
-    #[test]
-    fn test_cli_parsing_verbose() {
-        let args = vec!["kubectl-tail", "pod/my-pod", "-v"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        assert!(cli.verbose);
-    }
-
-    #[test]
-    fn test_parse_labels() {
-        let result = parse_labels("app=nginx,version=v1");
-        let mut expected = std::collections::BTreeMap::new();
-        expected.insert("app".to_string(), "nginx".to_string());
-        expected.insert("version".to_string(), "v1".to_string());
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_selector_to_labels_string() {
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert("app".to_string(), "nginx".to_string());
-        labels.insert("version".to_string(), "v1".to_string());
-        let selector = LabelSelector {
-            match_labels: Some(labels),
-            match_expressions: None,
-        };
-        let result = selector_to_labels_string(&selector);
-        assert_eq!(result, Some("app=nginx,version=v1".to_string()));
-    }
-
-    #[test]
-    fn test_matches_selector_labels() {
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("app".to_string(), "nginx".to_string());
-        pod_labels.insert("version".to_string(), "v1".to_string());
-
-        let mut sel_labels = std::collections::BTreeMap::new();
-        sel_labels.insert("app".to_string(), "nginx".to_string());
-        let selector = LabelSelector {
-            match_labels: Some(sel_labels),
-            match_expressions: None,
-        };
-
-        assert!(matches_selector(&pod_labels, &selector));
-    }
-
-    #[test]
-    fn test_matches_selector_expressions_in() {
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
-
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("env".to_string(), "prod".to_string());
-
-        let expr = LabelSelectorRequirement {
-            key: "env".to_string(),
-            operator: "In".to_string(),
-            values: Some(vec!["prod".to_string(), "dev".to_string()]),
-        };
-        let selector = LabelSelector {
-            match_labels: None,
-            match_expressions: Some(vec![expr]),
-        };
-
-        assert!(matches_selector(&pod_labels, &selector));
-    }
-
-    #[test]
-    fn test_matches_selector_expressions_exists() {
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
-
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("app".to_string(), "nginx".to_string());
-
-        let expr = LabelSelectorRequirement {
-            key: "app".to_string(),
-            operator: "Exists".to_string(),
-            values: None,
-        };
-        let selector = LabelSelector {
-            match_labels: None,
-            match_expressions: Some(vec![expr]),
-        };
-
-        assert!(matches_selector(&pod_labels, &selector));
-    }
-}
+use utils::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -344,89 +105,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut pod_names: Vec<String> = initial_pods.into_iter().collect();
 
-    fn parse_labels(sel_str: &str) -> std::collections::BTreeMap<String, String> {
-        let mut map = std::collections::BTreeMap::new();
-        for pair in sel_str.split(',') {
-            let pair = pair.trim();
-            if let Some(eq_pos) = pair.find('=') {
-                let key = pair[..eq_pos].to_string();
-                let value = pair[eq_pos + 1..].to_string();
-                map.insert(key, value);
-            }
-        }
-        map
-    }
-
-    fn selector_to_labels_string(selector: &LabelSelector) -> Option<String> {
-        if let Some(labels) = &selector.match_labels {
-            if labels.is_empty() {
-                None
-            } else {
-                Some(
-                    labels
-                        .iter()
-                        .map(|(k, v)| format!("{}={}", k, v))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-            }
-        } else {
-            None
-        }
-    }
-
-    fn matches_selector(
-        pod_labels: &std::collections::BTreeMap<String, String>,
-        selector: &LabelSelector,
-    ) -> bool {
-        // Check match_labels
-        if let Some(match_labels) = &selector.match_labels {
-            for (key, value) in match_labels {
-                if pod_labels.get(key) != Some(value) {
-                    return false;
-                }
-            }
-        }
-        // Check match_expressions
-        if let Some(expressions) = &selector.match_expressions {
-            for expr in expressions {
-                let pod_value = pod_labels.get(&expr.key);
-                match expr.operator.as_str() {
-                    "In" => {
-                        if let Some(values) = &expr.values {
-                            if pod_value.is_none() || !values.contains(pod_value.unwrap()) {
-                                return false;
-                            }
-                        } else {
-                            return false; // No values for In
-                        }
-                    }
-                    "NotIn" => {
-                        if let Some(values) = &expr.values {
-                            if pod_value.is_some() && values.contains(pod_value.unwrap()) {
-                                return false;
-                            }
-                        } else {
-                            return false; // No values for NotIn
-                        }
-                    }
-                    "Exists" => {
-                        if pod_value.is_none() {
-                            return false;
-                        }
-                    }
-                    "DoesNotExist" => {
-                        if pod_value.is_some() {
-                            return false;
-                        }
-                    }
-                    _ => return false, // Unknown operator
-                }
-            }
-        }
-        true
-    }
-
     println!("Found pods: {:?}", pod_names);
 
     // Channel for log messages
@@ -485,7 +163,9 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        println!("New pod added: {}", name);
+                                        if verbose {
+                                            println!("New pod added: {}", name);
+                                        }
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -503,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
                             Ok(kube::api::WatchEvent::Deleted(pod)) => {
                                 let name = pod.name_any();
                                 pod_names.retain(|n| n != &name);
-                                println!("Pod deleted: {}", name);
+                                if verbose {
+                                    println!("Pod deleted: {}", name);
+                                }
                                 if let Some(pod_handles) = handles.remove(&name) {
                                     for handle in pod_handles {
                                         handle.abort();
@@ -525,7 +207,9 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        println!("Pod became running: {}", name);
+                                        if verbose {
+                                            println!("Pod became running: {}", name);
+                                        }
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -540,7 +224,9 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 } else if !is_running && is_in_list {
                                     pod_names.retain(|n| n != &name);
-                                    println!("Pod stopped running: {}", name);
+                                    if verbose {
+                                        println!("Pod stopped running: {}", name);
+                                    }
                                     if let Some(pod_handles) = handles.remove(&name) {
                                         for handle in pod_handles {
                                             handle.abort();
