@@ -129,9 +129,12 @@ pub async fn spawn_tail_tasks_for_pod(
     container: Option<String>,
     tx: mpsc::Sender<LogMessage>,
     tail: Option<i64>,
+    verbose: bool,
 ) -> Vec<AbortHandle> {
     if let Some(cont) = container {
-        vec![spawn_tail_task(client, pod_name, namespace, cont, tx, tail)]
+        vec![spawn_tail_task(
+            client, pod_name, namespace, cont, tx, tail, verbose,
+        )]
     } else {
         // Fetch pod to get container names
         let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
@@ -147,6 +150,7 @@ pub async fn spawn_tail_tasks_for_pod(
                             c.name.clone(),
                             tx.clone(),
                             tail,
+                            verbose,
                         );
                         handles.push(handle);
                     }
@@ -154,7 +158,9 @@ pub async fn spawn_tail_tasks_for_pod(
                 handles
             }
             Err(e) => {
-                eprintln!("Failed to get pod {} for containers: {}", pod_name, e);
+                if verbose {
+                    eprintln!("Failed to get pod {} for containers: {}", pod_name, e);
+                }
                 vec![]
             }
         }
@@ -168,6 +174,7 @@ pub fn spawn_tail_task(
     container_name: String,
     tx: mpsc::Sender<LogMessage>,
     tail: Option<i64>,
+    verbose: bool,
 ) -> AbortHandle {
     let api: Api<Pod> = Api::namespaced(client, &namespace);
 
@@ -179,10 +186,12 @@ pub fn spawn_tail_task(
             ..Default::default()
         };
 
-        eprintln!(
-            "Starting to tail logs for pod {}/{} in namespace {}",
-            pod_name, container_name, namespace
-        );
+        if verbose {
+            eprintln!(
+                "Starting to tail logs for pod {}/{} in namespace {}",
+                pod_name, container_name, namespace
+            );
+        }
         // Follow logs with tail
         let lp_follow = LogParams {
             follow: true,
@@ -207,34 +216,42 @@ pub fn spawn_tail_task(
                                 }
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "Error reading follow log line from pod {}/{}: {}, retrying",
-                                    pod_name, container_name, e
-                                );
+                                if verbose {
+                                    eprintln!(
+                                        "Error reading follow log line from pod {}/{}: {}, retrying",
+                                        pod_name, container_name, e
+                                    );
+                                }
                                 break;
                             }
                         }
                     }
                     // If stream ended, retry
-                    eprintln!(
-                        "Log stream ended for pod {}/{}, retrying in 5 seconds",
-                        pod_name, container_name
-                    );
+                    if verbose {
+                        eprintln!(
+                            "Log stream ended for pod {}/{}, retrying in 5 seconds",
+                            pod_name, container_name
+                        );
+                    }
                 }
                 Err(e) => {
                     if let kube::Error::Api(err) = &e {
                         if err.code == 404 {
-                            eprintln!(
-                                "Pod {}/{} not found (404), stopping tail",
-                                pod_name, container_name
-                            );
+                            if verbose {
+                                eprintln!(
+                                    "Pod {}/{} not found (404), stopping tail",
+                                    pod_name, container_name
+                                );
+                            }
                             return;
                         }
                     }
-                    eprintln!(
-                        "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",
-                        pod_name, container_name, e
-                    );
+                    if verbose {
+                        eprintln!(
+                            "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",
+                            pod_name, container_name, e
+                        );
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

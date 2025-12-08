@@ -185,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
             cli.container.clone(),
             tx.clone(),
             cli.tail,
+            cli.verbose,
         )
         .await;
         handles.insert(name.clone(), pod_handles);
@@ -192,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start watching for pod changes
     let all_selectors_clone = all_selectors.clone();
+    let verbose = cli.verbose;
     tokio::spawn(async move {
         let wp = WatchParams::default();
         loop {
@@ -215,7 +217,9 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        println!("New pod added: {}", name);
+                                        if verbose {
+                                            println!("New pod added: {}", name);
+                                        }
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -223,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
                                             cli.container.clone(),
                                             tx.clone(),
                                             cli.tail,
+                                            verbose,
                                         )
                                         .await;
                                         handles.insert(name.clone(), pod_handles);
@@ -232,7 +237,9 @@ async fn main() -> anyhow::Result<()> {
                             Ok(kube::api::WatchEvent::Deleted(pod)) => {
                                 let name = pod.name_any();
                                 pod_names.retain(|n| n != &name);
-                                println!("Pod deleted: {}", name);
+                                if verbose {
+                                    println!("Pod deleted: {}", name);
+                                }
                                 if let Some(pod_handles) = handles.remove(&name) {
                                     for handle in pod_handles {
                                         handle.abort();
@@ -254,7 +261,9 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        println!("Pod became running: {}", name);
+                                        if verbose {
+                                            println!("Pod became running: {}", name);
+                                        }
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -262,13 +271,16 @@ async fn main() -> anyhow::Result<()> {
                                             cli.container.clone(),
                                             tx.clone(),
                                             cli.tail,
+                                            verbose,
                                         )
                                         .await;
                                         handles.insert(name.clone(), pod_handles);
                                     }
                                 } else if !is_running && is_in_list {
                                     pod_names.retain(|n| n != &name);
-                                    println!("Pod stopped running: {}", name);
+                                    if verbose {
+                                        println!("Pod stopped running: {}", name);
+                                    }
                                     if let Some(pod_handles) = handles.remove(&name) {
                                         for handle in pod_handles {
                                             handle.abort();
@@ -277,16 +289,22 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Watch error: {}, retrying", e);
+                                if verbose {
+                                    eprintln!("Watch error: {}, retrying", e);
+                                }
                                 break;
                             }
                             _ => {}
                         }
                     }
-                    eprintln!("Watch stream ended, retrying in 5 seconds");
+                    if verbose {
+                        eprintln!("Watch stream ended, retrying in 5 seconds");
+                    }
                 }
                 Err(e) => {
-                    eprintln!("Failed to start pod watch: {}, retrying in 5 seconds", e);
+                    if verbose {
+                        eprintln!("Failed to start pod watch: {}, retrying in 5 seconds", e);
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

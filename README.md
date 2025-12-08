@@ -67,6 +67,7 @@ kubectl-tail [OPTIONS] [RESOURCES]...
 - `-c, --container <CONTAINER>`: Container name to tail (if multi-container pod)
 - `--context <CONTEXT>`: Kubernetes context to use
 - `--tail <TAIL>`: Number of lines to show from the end of the logs on startup (-1 for all, 0 for none, default: follow from end)
+- `-v, --verbose`: Enable verbose output for retry messages and pod events
 
 ### Examples
 

@@ -26,4 +26,8 @@ pub struct Cli {
     /// Number of lines to show from the end of the logs on startup
     #[arg(long)]
     pub tail: Option<i64>,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
 }
