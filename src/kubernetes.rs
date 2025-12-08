@@ -6,6 +6,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::{Api, Client, api::LogParams};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -189,36 +190,54 @@ pub fn spawn_tail_task(
             tail_lines: if tail > 0 { Some(tail as i64) } else { None },
             ..Default::default()
         };
-        match api.log_stream(&pod_name, &lp_follow).await {
-            Ok(stream) => {
-                let mut line_stream = stream.lines();
-                while let Some(line_result) = line_stream.next().await {
-                    match line_result {
-                        Ok(line) => {
-                            let msg = LogMessage {
-                                pod_name: pod_name.clone(),
-                                container_name: container_name.clone(),
-                                line,
-                            };
-                            if tx.send(msg).await.is_err() {
+        loop {
+            match api.log_stream(&pod_name, &lp_follow).await {
+                Ok(stream) => {
+                    let mut line_stream = stream.lines();
+                    while let Some(line_result) = line_stream.next().await {
+                        match line_result {
+                            Ok(line) => {
+                                let msg = LogMessage {
+                                    pod_name: pod_name.clone(),
+                                    container_name: container_name.clone(),
+                                    line,
+                                };
+                                if tx.send(msg).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Error reading follow log line from pod {}/{}: {}, retrying",
+                                    pod_name, container_name, e
+                                );
                                 break;
                             }
                         }
-                        Err(e) => {
+                    }
+                    // If stream ended, retry
+                    eprintln!(
+                        "Log stream ended for pod {}/{}, retrying in 5 seconds",
+                        pod_name, container_name
+                    );
+                }
+                Err(e) => {
+                    if let kube::Error::Api(err) = &e {
+                        if err.code == 404 {
                             eprintln!(
-                                "Error reading follow log line from pod {}/{}: {}",
-                                pod_name, container_name, e
+                                "Pod {}/{} not found (404), stopping tail",
+                                pod_name, container_name
                             );
+                            return;
                         }
                     }
+                    eprintln!(
+                        "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",
+                        pod_name, container_name, e
+                    );
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "Failed to get follow log stream for pod {}/{}: {}",
-                    pod_name, container_name, e
-                );
-            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 
