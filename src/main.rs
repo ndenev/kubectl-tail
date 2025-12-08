@@ -226,9 +226,7 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        if verbose {
-                                            println!("New pod added: {}", name);
-                                        }
+                                        println!("New pod added: {}", name);
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -246,9 +244,7 @@ async fn main() -> anyhow::Result<()> {
                             Ok(kube::api::WatchEvent::Deleted(pod)) => {
                                 let name = pod.name_any();
                                 pod_names.retain(|n| n != &name);
-                                if verbose {
-                                    println!("Pod deleted: {}", name);
-                                }
+                                println!("Pod deleted: {}", name);
                                 if let Some(pod_handles) = handles.remove(&name) {
                                     for handle in pod_handles {
                                         handle.abort();
@@ -270,9 +266,7 @@ async fn main() -> anyhow::Result<()> {
                                         })
                                     {
                                         pod_names.push(name.clone());
-                                        if verbose {
-                                            println!("Pod became running: {}", name);
-                                        }
+                                        println!("Pod became running: {}", name);
                                         let pod_handles = spawn_tail_tasks_for_pod(
                                             client.clone(),
                                             name.clone(),
@@ -287,9 +281,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 } else if !is_running && is_in_list {
                                     pod_names.retain(|n| n != &name);
-                                    if verbose {
-                                        println!("Pod stopped running: {}", name);
-                                    }
+                                    println!("Pod stopped running: {}", name);
                                     if let Some(pod_handles) = handles.remove(&name) {
                                         for handle in pod_handles {
                                             handle.abort();
