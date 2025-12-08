@@ -218,8 +218,8 @@ async fn main() -> anyhow::Result<()> {
                                     && !pod_names.contains(&name)
                                 {
                                     let labels = pod.metadata.labels.as_ref();
-                                    if all_selectors_clone.is_empty()
-                                        || labels.map_or(false, |l| {
+                                    if !all_selectors_clone.is_empty()
+                                        && labels.map_or(false, |l| {
                                             all_selectors_clone
                                                 .iter()
                                                 .any(|sel| matches_selector(l, sel))
@@ -258,8 +258,8 @@ async fn main() -> anyhow::Result<()> {
                                 let is_in_list = pod_names.contains(&name);
                                 if is_running && !is_in_list {
                                     let labels = pod.metadata.labels.as_ref();
-                                    if all_selectors_clone.is_empty()
-                                        || labels.map_or(false, |l| {
+                                    if !all_selectors_clone.is_empty()
+                                        && labels.map_or(false, |l| {
                                             all_selectors_clone
                                                 .iter()
                                                 .any(|sel| matches_selector(l, sel))

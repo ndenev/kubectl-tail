@@ -73,6 +73,11 @@ where
     let selector = res
         .get_selector()
         .ok_or_else(|| anyhow::anyhow!("No selector"))?;
+    if let Some(exprs) = &selector.match_expressions {
+        if !exprs.is_empty() {
+            eprintln!("Warning: matchExpressions not supported, using only matchLabels for {}", name);
+        }
+    }
     let match_labels = selector
         .match_labels
         .as_ref()
@@ -179,13 +184,6 @@ pub fn spawn_tail_task(
     let api: Api<Pod> = Api::namespaced(client, &namespace);
 
     let handle = tokio::spawn(async move {
-        let _lp = LogParams {
-            follow: true,
-            container: Some(container_name.clone()),
-            tail_lines: None,
-            ..Default::default()
-        };
-
         if verbose {
             eprintln!(
                 "Starting to tail logs for pod {}/{} in namespace {}",
