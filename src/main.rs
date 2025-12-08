@@ -157,69 +157,69 @@ async fn main() -> anyhow::Result<()> {
     if let Some(mut watcher) = watcher {
         while let Some(event) = watcher.next().await {
             match event {
-            Ok(kube::api::WatchEvent::Added(pod)) => {
-                let name = pod.name_any();
-                if pod.status.as_ref().and_then(|s| s.phase.as_ref())
-                    == Some(&"Running".to_string())
-                    && !pod_names.contains(&name)
-                {
-                    pod_names.push(name.clone());
-                    println!("New pod added: {}", name);
-                    let pod_handles = spawn_tail_tasks_for_pod(
-                        client.clone(),
-                        name.clone(),
-                        namespace.to_string(),
-                        cli.container.clone(),
-                        tx.clone(),
-                    )
-                    .await;
-                    handles.insert(name.clone(), pod_handles);
-                }
-            }
-            Ok(kube::api::WatchEvent::Deleted(pod)) => {
-                let name = pod.name_any();
-                pod_names.retain(|n| n != &name);
-                println!("Pod deleted: {}", name);
-                if let Some(pod_handles) = handles.remove(&name) {
-                    for handle in pod_handles {
-                        handle.abort();
+                Ok(kube::api::WatchEvent::Added(pod)) => {
+                    let name = pod.name_any();
+                    if pod.status.as_ref().and_then(|s| s.phase.as_ref())
+                        == Some(&"Running".to_string())
+                        && !pod_names.contains(&name)
+                    {
+                        pod_names.push(name.clone());
+                        println!("New pod added: {}", name);
+                        let pod_handles = spawn_tail_tasks_for_pod(
+                            client.clone(),
+                            name.clone(),
+                            namespace.to_string(),
+                            cli.container.clone(),
+                            tx.clone(),
+                        )
+                        .await;
+                        handles.insert(name.clone(), pod_handles);
                     }
                 }
-            }
-            Ok(kube::api::WatchEvent::Modified(pod)) => {
-                let name = pod.name_any();
-                let is_running = pod.status.as_ref().and_then(|s| s.phase.as_ref())
-                    == Some(&"Running".to_string());
-                let is_in_list = pod_names.contains(&name);
-                if is_running && !is_in_list {
-                    pod_names.push(name.clone());
-                    println!("Pod became running: {}", name);
-                    let pod_handles = spawn_tail_tasks_for_pod(
-                        client.clone(),
-                        name.clone(),
-                        namespace.to_string(),
-                        cli.container.clone(),
-                        tx.clone(),
-                    )
-                    .await;
-                    handles.insert(name.clone(), pod_handles);
-                } else if !is_running && is_in_list {
+                Ok(kube::api::WatchEvent::Deleted(pod)) => {
+                    let name = pod.name_any();
                     pod_names.retain(|n| n != &name);
-                    println!("Pod stopped running: {}", name);
+                    println!("Pod deleted: {}", name);
                     if let Some(pod_handles) = handles.remove(&name) {
                         for handle in pod_handles {
                             handle.abort();
                         }
                     }
                 }
+                Ok(kube::api::WatchEvent::Modified(pod)) => {
+                    let name = pod.name_any();
+                    let is_running = pod.status.as_ref().and_then(|s| s.phase.as_ref())
+                        == Some(&"Running".to_string());
+                    let is_in_list = pod_names.contains(&name);
+                    if is_running && !is_in_list {
+                        pod_names.push(name.clone());
+                        println!("Pod became running: {}", name);
+                        let pod_handles = spawn_tail_tasks_for_pod(
+                            client.clone(),
+                            name.clone(),
+                            namespace.to_string(),
+                            cli.container.clone(),
+                            tx.clone(),
+                        )
+                        .await;
+                        handles.insert(name.clone(), pod_handles);
+                    } else if !is_running && is_in_list {
+                        pod_names.retain(|n| n != &name);
+                        println!("Pod stopped running: {}", name);
+                        if let Some(pod_handles) = handles.remove(&name) {
+                            for handle in pod_handles {
+                                handle.abort();
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Watch error: {}", e);
+                    break;
+                }
+                _ => {}
             }
-            Err(e) => {
-                eprintln!("Watch error: {}", e);
-                break;
-            }
-            _ => {}
         }
-    }
     }
 
     Ok(())
