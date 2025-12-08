@@ -146,12 +146,17 @@ async fn main() -> anyhow::Result<()> {
         handles.insert(name.clone(), pod_handles);
     }
 
-    // Start watching for pod changes
-    let wp = WatchParams::default().labels(&lp.label_selector.unwrap_or_default());
-    let mut watcher = pods_api.watch(&wp, "0").await?.boxed();
+    // Start watching for pod changes only if we have a label selector (for deployments, etc.)
+    let watcher = if label_selector.is_some() {
+        let wp = WatchParams::default().labels(&lp.label_selector.unwrap_or_default());
+        Some(pods_api.watch(&wp, "0").await?.boxed())
+    } else {
+        None
+    };
 
-    while let Some(event) = watcher.next().await {
-        match event {
+    if let Some(mut watcher) = watcher {
+        while let Some(event) = watcher.next().await {
+            match event {
             Ok(kube::api::WatchEvent::Added(pod)) => {
                 let name = pod.name_any();
                 if pod.status.as_ref().and_then(|s| s.phase.as_ref())
@@ -214,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ => {}
         }
+    }
     }
 
     Ok(())
