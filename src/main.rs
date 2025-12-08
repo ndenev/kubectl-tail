@@ -12,6 +12,7 @@ use kube::{
     config,
 };
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -31,9 +32,9 @@ fn get_color(s: &str) -> Color {
         Color::Grey,
         Color::DarkGrey,
     ];
-    let hash = s
-        .bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
     colors[(hash % colors.len() as u32) as usize]
 }
 
