@@ -1,0 +1,17 @@
+[package]
+name = "kubectl-tail"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kube = { version = "0.95", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.23", features = ["v1_29"] }
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+ratatui = "0.29"
+crossterm = "0.28"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+anyhow = "1.0"
+tokio-stream = "0.1"
