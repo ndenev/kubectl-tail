@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  release:
+    types: [ published ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'release'
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - name: Check formatting
+      run: cargo fmt --check
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+    - name: Run tests
+      run: cargo test
+
+  build:
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'release'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: kubectl-tail-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: kubectl-tail-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: kubectl-tail-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: kubectl-tail-windows-x86_64.exe
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build release binary
+      run: cargo build --release --target ${{ matrix.target }}
+    - name: Upload binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: target/${{ matrix.target }}/release/kubectl-tail${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+        asset_name: ${{ matrix.name }}
+        asset_content_type: application/octet-stream
