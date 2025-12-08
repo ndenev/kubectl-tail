@@ -94,12 +94,22 @@ async fn main() -> anyhow::Result<()> {
     let mut pod_names: Vec<String> = if let Some(sel) = &label_selector {
         let lp = ListParams::default().labels(sel);
         let pods = pods_api.list(&lp).await?;
-        pods.iter().map(|p| p.name_any()).collect()
+        pods.iter()
+            .filter(|p| {
+                p.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&"Running".to_string())
+            })
+            .map(|p| p.name_any())
+            .collect()
     } else if resource_type == "pod" && resource_name.is_some() {
         vec![resource_name.clone().unwrap()]
     } else {
         let pods = pods_api.list(&ListParams::default()).await?;
-        pods.iter().map(|p| p.name_any()).collect()
+        pods.iter()
+            .filter(|p| {
+                p.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&"Running".to_string())
+            })
+            .map(|p| p.name_any())
+            .collect()
     };
 
     let lp = if let Some(sel) = &label_selector {
@@ -144,7 +154,10 @@ async fn main() -> anyhow::Result<()> {
         match event {
             Ok(kube::api::WatchEvent::Added(pod)) => {
                 let name = pod.name_any();
-                if !pod_names.contains(&name) {
+                if pod.status.as_ref().and_then(|s| s.phase.as_ref())
+                    == Some(&"Running".to_string())
+                    && !pod_names.contains(&name)
+                {
                     pod_names.push(name.clone());
                     println!("New pod added: {}", name);
                     let pod_handles = spawn_tail_tasks_for_pod(
@@ -168,8 +181,32 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            Ok(kube::api::WatchEvent::Modified(_pod)) => {
-                // Handle modifications if needed, e.g., phase change
+            Ok(kube::api::WatchEvent::Modified(pod)) => {
+                let name = pod.name_any();
+                let is_running = pod.status.as_ref().and_then(|s| s.phase.as_ref())
+                    == Some(&"Running".to_string());
+                let is_in_list = pod_names.contains(&name);
+                if is_running && !is_in_list {
+                    pod_names.push(name.clone());
+                    println!("Pod became running: {}", name);
+                    let pod_handles = spawn_tail_tasks_for_pod(
+                        client.clone(),
+                        name.clone(),
+                        namespace.to_string(),
+                        cli.container.clone(),
+                        tx.clone(),
+                    )
+                    .await;
+                    handles.insert(name.clone(), pod_handles);
+                } else if !is_running && is_in_list {
+                    pod_names.retain(|n| n != &name);
+                    println!("Pod stopped running: {}", name);
+                    if let Some(pod_handles) = handles.remove(&name) {
+                        for handle in pod_handles {
+                            handle.abort();
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Watch error: {}", e);
