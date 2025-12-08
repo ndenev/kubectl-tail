@@ -190,14 +190,17 @@ pub fn spawn_tail_task(
                 pod_name, container_name, namespace
             );
         }
-        // Follow logs with tail
-        let lp_follow = LogParams {
-            follow: true,
-            container: Some(container_name.clone()),
-            tail_lines: tail,
-            ..Default::default()
-        };
+        let mut is_first_attempt = true;
         loop {
+            // Follow logs with tail only on first attempt to avoid replay
+            let tail_lines = if is_first_attempt { tail } else { None };
+            is_first_attempt = false;
+            let lp_follow = LogParams {
+                follow: true,
+                container: Some(container_name.clone()),
+                tail_lines,
+                ..Default::default()
+            };
             match api.log_stream(&pod_name, &lp_follow).await {
                 Ok(stream) => {
                     let mut line_stream = stream.lines();
