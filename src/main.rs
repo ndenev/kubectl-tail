@@ -29,8 +29,14 @@ fn get_color(s: &str) -> Color {
         Color::Yellow,
         Color::Magenta,
         Color::Cyan,
+        Color::White,
         Color::Grey,
-        Color::DarkGrey,
+        Color::AnsiValue(91), // Bright Red
+        Color::AnsiValue(92), // Bright Green
+        Color::AnsiValue(94), // Bright Blue
+        Color::AnsiValue(93), // Bright Yellow
+        Color::AnsiValue(95), // Bright Magenta
+        Color::AnsiValue(96), // Bright Cyan
     ];
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
