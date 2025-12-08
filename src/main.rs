@@ -31,7 +31,9 @@ fn get_color(s: &str) -> Color {
         Color::Grey,
         Color::DarkGrey,
     ];
-    let hash = s.chars().map(|c| c as u32).sum::<u32>();
+    let hash = s
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     colors[(hash % colors.len() as u32) as usize]
 }
 
