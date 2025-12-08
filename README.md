@@ -55,41 +55,46 @@ Make sure `~/.cargo/bin` is in your PATH.
 ## Usage
 
 ```bash
-kubectl tail [OPTIONS] [RESOURCE_NAME]
+kubectl-tail [OPTIONS] [RESOURCE]
 ```
 
 ### Options
 
 - `-n, --namespace <NAMESPACE>`: Specify the namespace (default: default)
 - `-l, --selector <SELECTOR>`: Label selector for pods
-- `-t, --resource-type <TYPE>`: Resource type to tail (default: pod). Options: pod, deployment, statefulset, daemonset, job, etc.
-- `-c, --context <CONTEXT>`: Kubernetes context to use
+- `-c, --container <CONTAINER>`: Container name to tail (if multi-container pod)
+- `--context <CONTEXT>`: Kubernetes context to use
 
 ### Examples
 
 Tail logs from all pods in the default namespace:
 ```bash
-kubectl tail
+kubectl-tail
 ```
 
 Tail logs from pods with a specific label:
 ```bash
-kubectl tail -l app=nginx
+kubectl-tail -l app=nginx
 ```
 
 Tail logs from a deployment:
 ```bash
-kubectl tail -t deployment my-deployment
+kubectl-tail deployment/my-deployment
 ```
 
 Tail logs from a specific pod:
 ```bash
-kubectl tail my-pod
+kubectl-tail my-pod
+```
+
+Tail logs from a specific container in a pod:
+```bash
+kubectl-tail my-pod -c app
 ```
 
 Tail logs in a specific namespace:
 ```bash
-kubectl tail -n production
+kubectl-tail -n production deployment/my-deployment
 ```
 
 ## How it works

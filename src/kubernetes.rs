@@ -1,41 +1,73 @@
 use crate::types::LogMessage;
 use kube::{Api, Client, api::{LogParams}};
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
+use std::collections::BTreeMap;
+use std::fmt::Debug;
 
-pub async fn get_selector_from_resource(client: &Client, resource_type: &str, name: &str, namespace: &str) -> anyhow::Result<String> {
+trait HasSelector {
+    fn get_selector(&self) -> Option<&LabelSelector>;
+}
+
+impl HasSelector for k8s_openapi::api::apps::v1::Deployment {
+    fn get_selector(&self) -> Option<&LabelSelector> {
+        self.spec.as_ref().map(|s| &s.selector)
+    }
+}
+
+impl HasSelector for k8s_openapi::api::apps::v1::StatefulSet {
+    fn get_selector(&self) -> Option<&LabelSelector> {
+        self.spec.as_ref().map(|s| &s.selector)
+    }
+}
+
+impl HasSelector for k8s_openapi::api::apps::v1::DaemonSet {
+    fn get_selector(&self) -> Option<&LabelSelector> {
+        self.spec.as_ref().map(|s| &s.selector)
+    }
+}
+
+impl HasSelector for k8s_openapi::api::apps::v1::ReplicaSet {
+    fn get_selector(&self) -> Option<&LabelSelector> {
+        self.spec.as_ref().map(|s| &s.selector)
+    }
+}
+
+impl HasSelector for k8s_openapi::api::batch::v1::Job {
+    fn get_selector(&self) -> Option<&LabelSelector> {
+        self.spec.as_ref().and_then(|s| s.selector.as_ref())
+    }
+}
+
+fn extract_labels(match_labels: &BTreeMap<String, String>) -> String {
+    match_labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(",")
+}
+
+async fn get_selector_from_resource_generic<T>(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+) -> anyhow::Result<Option<String>>
+where
+    T: k8s_openapi::Resource<Scope = k8s_openapi::NamespaceResourceScope> + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta> + HasSelector + serde::de::DeserializeOwned + serde::Serialize + Clone + Debug + Send + Sync,
+{
+    let api: Api<T> = Api::namespaced(client.clone(), namespace);
+    let res = api.get(name).await?;
+    let selector = res.get_selector().ok_or_else(|| anyhow::anyhow!("No selector"))?;
+    let match_labels = selector.match_labels.as_ref().ok_or_else(|| anyhow::anyhow!("No match_labels"))?;
+    Ok(Some(extract_labels(match_labels)))
+}
+
+pub async fn get_selector_from_resource(client: &Client, resource_type: &str, name: &str, namespace: &str) -> anyhow::Result<Option<String>> {
     match resource_type {
-        "deployment" => {
-            use k8s_openapi::api::apps::v1::Deployment;
-            let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-            let dep = api.get(name).await?;
-            let spec = dep.spec.ok_or_else(|| anyhow::anyhow!("No spec for deployment"))?;
-            let match_labels = spec.selector.match_labels.ok_or_else(|| anyhow::anyhow!("No match_labels"))?;
-            let labels: Vec<String> = match_labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-            Ok(labels.join(","))
-        }
-        "statefulset" => {
-            use k8s_openapi::api::apps::v1::StatefulSet;
-            let api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-            let sts = api.get(name).await?;
-            let spec = sts.spec.ok_or_else(|| anyhow::anyhow!("No spec for statefulset"))?;
-            let match_labels = spec.selector.match_labels.ok_or_else(|| anyhow::anyhow!("No match_labels"))?;
-            let labels: Vec<String> = match_labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-            Ok(labels.join(","))
-        }
-        "daemonset" => {
-            use k8s_openapi::api::apps::v1::DaemonSet;
-            let api: Api<DaemonSet> = Api::namespaced(client.clone(), namespace);
-            let ds = api.get(name).await?;
-            let spec = ds.spec.ok_or_else(|| anyhow::anyhow!("No spec for daemonset"))?;
-            let match_labels = spec.selector.match_labels.ok_or_else(|| anyhow::anyhow!("No match_labels"))?;
-            let labels: Vec<String> = match_labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-            Ok(labels.join(","))
-        }
-        "pod" => {
-            anyhow::bail!("For pod, use label selector or specify labels");
-        }
+        "deployment" => get_selector_from_resource_generic::<k8s_openapi::api::apps::v1::Deployment>(client, name, namespace).await,
+        "statefulset" => get_selector_from_resource_generic::<k8s_openapi::api::apps::v1::StatefulSet>(client, name, namespace).await,
+        "daemonset" => get_selector_from_resource_generic::<k8s_openapi::api::apps::v1::DaemonSet>(client, name, namespace).await,
+        "job" => get_selector_from_resource_generic::<k8s_openapi::api::batch::v1::Job>(client, name, namespace).await,
+        "replicaset" => get_selector_from_resource_generic::<k8s_openapi::api::apps::v1::ReplicaSet>(client, name, namespace).await,
+        "pod" => Ok(None),
         _ => anyhow::bail!("Unsupported resource type: {}", resource_type),
     }
 }

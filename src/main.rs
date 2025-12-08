@@ -14,6 +14,40 @@ use cli::Cli;
 use kubernetes::{get_selector_from_resource, spawn_tail_tasks_for_pod};
 use types::LogMessage;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_parsing_deployment() {
+        let args = vec!["kubectl-tail", "deployment/my-deployment"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.resource, Some("deployment/my-deployment".to_string()));
+        assert!(cli.selector.is_none());
+    }
+
+    #[test]
+    fn test_cli_parsing_pod() {
+        let args = vec!["kubectl-tail", "my-pod"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.resource, Some("my-pod".to_string()));
+    }
+
+    #[test]
+    fn test_cli_parsing_labels() {
+        let args = vec!["kubectl-tail", "-l", "app=nginx"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.selector, Some("app=nginx".to_string()));
+    }
+
+    #[test]
+    fn test_cli_parsing_container() {
+        let args = vec!["kubectl-tail", "my-pod", "-c", "app"];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.container, Some("app".to_string()));
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -29,24 +63,45 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::try_from(config)?;
     let namespace = cli.namespace.as_deref().unwrap_or("default");
 
-    let mut label_selector = cli.selector;
+    let (resource_type, resource_name) = if let Some(res) = &cli.resource {
+        if let Some(slash_pos) = res.find('/') {
+            let typ = res[..slash_pos].to_string();
+            let nam = res[slash_pos + 1..].to_string();
+            (typ, Some(nam))
+        } else {
+            ("pod".to_string(), Some(res.clone()))
+        }
+    } else {
+        ("pod".to_string(), None)
+    };
 
-    if let Some(name) = &cli.resource_name {
-        // Get selector from the resource
-        label_selector = Some(get_selector_from_resource(&client, &cli.resource_type, name, namespace).await?);
-    }
+    let label_selector_from_resource = if let Some(name) = &resource_name {
+        get_selector_from_resource(&client, &resource_type, name, namespace).await?
+    } else {
+        None
+    };
+
+    let label_selector = label_selector_from_resource.or(cli.selector);
+
+    let pods_api: Api<Pod> = Api::namespaced(client.clone(), namespace);
+
+    // Initial list of pods
+    let mut pod_names: Vec<String> = if let Some(sel) = &label_selector {
+        let lp = ListParams::default().labels(sel);
+        let pods = pods_api.list(&lp).await?;
+        pods.iter().map(|p| p.name_any()).collect()
+    } else if resource_type == "pod" && resource_name.is_some() {
+        vec![resource_name.clone().unwrap()]
+    } else {
+        let pods = pods_api.list(&ListParams::default()).await?;
+        pods.iter().map(|p| p.name_any()).collect()
+    };
 
     let lp = if let Some(sel) = &label_selector {
         ListParams::default().labels(sel)
     } else {
         ListParams::default()
     };
-
-    let pods_api: Api<Pod> = Api::namespaced(client.clone(), namespace);
-
-    // Initial list of pods
-    let pods = pods_api.list(&lp).await?;
-    let mut pod_names: Vec<String> = pods.iter().map(|p| p.name_any()).collect();
 
     println!("Found pods: {:?}", pod_names);
 
