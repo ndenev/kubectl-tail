@@ -3,9 +3,13 @@ mod kubernetes;
 mod types;
 
 use clap::Parser;
-use kube::{Api, Client, api::{ListParams, WatchParams}, ResourceExt, config};
-use k8s_openapi::api::core::v1::Pod;
 use futures::stream::StreamExt;
+use k8s_openapi::api::core::v1::Pod;
+use kube::{
+    Api, Client, ResourceExt,
+    api::{ListParams, WatchParams},
+    config,
+};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -56,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
         config::Config::from_kubeconfig(&config::KubeConfigOptions {
             context: Some(ctx.clone()),
             ..Default::default()
-        }).await?
+        })
+        .await?
     } else {
         config::Config::infer().await?
     };
@@ -120,7 +125,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn tail tasks for initial pods
     for name in &pod_names {
-        let pod_handles = spawn_tail_tasks_for_pod(client.clone(), name.clone(), namespace.to_string(), cli.container.clone(), tx.clone()).await;
+        let pod_handles = spawn_tail_tasks_for_pod(
+            client.clone(),
+            name.clone(),
+            namespace.to_string(),
+            cli.container.clone(),
+            tx.clone(),
+        )
+        .await;
         handles.insert(name.clone(), pod_handles);
     }
 
@@ -135,7 +147,14 @@ async fn main() -> anyhow::Result<()> {
                 if !pod_names.contains(&name) {
                     pod_names.push(name.clone());
                     println!("New pod added: {}", name);
-                    let pod_handles = spawn_tail_tasks_for_pod(client.clone(), name.clone(), namespace.to_string(), cli.container.clone(), tx.clone()).await;
+                    let pod_handles = spawn_tail_tasks_for_pod(
+                        client.clone(),
+                        name.clone(),
+                        namespace.to_string(),
+                        cli.container.clone(),
+                        tx.clone(),
+                    )
+                    .await;
                     handles.insert(name.clone(), pod_handles);
                 }
             }
