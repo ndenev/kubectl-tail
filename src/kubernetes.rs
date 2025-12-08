@@ -218,16 +218,14 @@ pub fn spawn_tail_task(
                     }
                 }
                 Err(e) => {
-                    if let kube::Error::Api(err) = &e {
-                        if err.code == 404 {
-                            if verbose {
-                                eprintln!(
-                                    "Pod {}/{} not found (404), stopping tail",
-                                    pod_name, container_name
-                                );
-                            }
-                            return;
+                    if let kube::Error::Api(err) = &e && err.code == 404 {
+                        if verbose {
+                            eprintln!(
+                                "Pod {}/{} not found (404), stopping tail",
+                                pod_name, container_name
+                            );
                         }
+                        return;
                     }
                     if verbose {
                         eprintln!(
