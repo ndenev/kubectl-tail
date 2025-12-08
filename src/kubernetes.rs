@@ -128,7 +128,7 @@ pub async fn spawn_tail_tasks_for_pod(
     namespace: String,
     container: Option<String>,
     tx: mpsc::Sender<LogMessage>,
-    tail: u32,
+    tail: Option<i64>,
 ) -> Vec<AbortHandle> {
     if let Some(cont) = container {
         vec![spawn_tail_task(client, pod_name, namespace, cont, tx, tail)]
@@ -167,7 +167,7 @@ pub fn spawn_tail_task(
     namespace: String,
     container_name: String,
     tx: mpsc::Sender<LogMessage>,
-    tail: u32,
+    tail: Option<i64>,
 ) -> AbortHandle {
     let api: Api<Pod> = Api::namespaced(client, &namespace);
 
@@ -187,7 +187,7 @@ pub fn spawn_tail_task(
         let lp_follow = LogParams {
             follow: true,
             container: Some(container_name.clone()),
-            tail_lines: if tail > 0 { Some(tail as i64) } else { None },
+            tail_lines: tail,
             ..Default::default()
         };
         loop {

@@ -24,6 +24,6 @@ pub struct Cli {
     pub context: Option<String>,
 
     /// Number of lines to show from the end of the logs on startup
-    #[arg(long, default_value = "0")]
-    pub tail: u32,
+    #[arg(long)]
+    pub tail: Option<i64>,
 }

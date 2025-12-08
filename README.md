@@ -5,9 +5,11 @@ A kubectl plugin for tailing logs from Kubernetes pods with continuous discovery
 ## Features
 
 - Tail logs from pods with automatic discovery of new pods
-- Support for various resource types (pods, deployments, statefulsets, daemonsets, jobs, etc.)
+- Support for multiple resources (e.g., several deployments) and various resource types (pods, deployments, statefulsets, daemonsets, jobs, etc.)
 - Filter by namespace, labels, and resource names
+- Colorized output for easy log differentiation
 - Continuous monitoring with graceful handling of pod restarts and deletions
+- Requires at least one resource or label selector to prevent accidental whole-namespace tailing
 
 ## Installation
 
@@ -55,7 +57,7 @@ Make sure `~/.cargo/bin` is in your PATH.
 ## Usage
 
 ```bash
-kubectl-tail [OPTIONS] [RESOURCE]
+kubectl-tail [OPTIONS] [RESOURCES]...
 ```
 
 ### Options
@@ -64,13 +66,9 @@ kubectl-tail [OPTIONS] [RESOURCE]
 - `-l, --selector <SELECTOR>`: Label selector for pods
 - `-c, --container <CONTAINER>`: Container name to tail (if multi-container pod)
 - `--context <CONTEXT>`: Kubernetes context to use
+- `--tail <TAIL>`: Number of lines to show from the end of the logs on startup (-1 for all, 0 for none, default: follow from end)
 
 ### Examples
-
-Tail logs from all pods in the default namespace:
-```bash
-kubectl-tail
-```
 
 Tail logs from pods with a specific label:
 ```bash
@@ -80,6 +78,11 @@ kubectl-tail -l app=nginx
 Tail logs from a deployment:
 ```bash
 kubectl-tail deployment/my-deployment
+```
+
+Tail logs from multiple deployments:
+```bash
+kubectl-tail deployment/app1 deployment/app2
 ```
 
 Tail logs from a specific pod:
@@ -99,7 +102,7 @@ kubectl-tail -n production deployment/my-deployment
 
 ## How it works
 
-kubectl-tail continuously watches for pods matching the specified criteria and spawns log tailing tasks for each pod. When new pods are created or existing pods are deleted, it automatically adjusts the tailing processes accordingly.
+kubectl-tail collects label selectors from the specified resources and continuously watches for pods in the namespace. It spawns log tailing tasks for matching running pods and automatically starts tailing new pods that match the selectors (e.g., from scaling deployments). Pods are color-coded for easy identification, and tailing stops gracefully when pods are deleted or become non-running.
 
 ## Contributing
 
