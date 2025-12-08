@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (leave empty for auto-increment patch)'
+        required: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # To get all history for tags
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+        else
+          # Get current version from Cargo.toml
+          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # Increment patch version
+          IFS='.' read -ra PARTS <<< "$CURRENT_VERSION"
+          PATCH=$((PARTS[2] + 1))
+          VERSION="${PARTS[0]}.${PARTS[1]}.$PATCH"
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Update Cargo.toml
+      run: |
+        sed -i "s/^version = \".*\"/version = \"${{ steps.version.outputs.VERSION }}\"/" Cargo.toml
+
+    - name: Commit and push
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'actions@github.com'
+        git add Cargo.toml
+        git commit -m "Release v${{ steps.version.outputs.VERSION }}"
+        git push
+
+    - name: Create tag
+      run: |
+        git tag "v${{ steps.version.outputs.VERSION }}"
+        git push origin "v${{ steps.version.outputs.VERSION }}"
+
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.VERSION }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
