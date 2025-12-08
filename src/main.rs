@@ -6,6 +6,7 @@ use clap::Parser;
 use crossterm::style::{Color, Stylize};
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::{
     Api, Client, ResourceExt,
     api::{ListParams, WatchParams},
@@ -113,14 +114,15 @@ async fn main() -> anyhow::Result<()> {
         resource_specs.push((typ, nam));
     }
 
-    let mut all_selectors = vec![];
+    let mut all_selectors = Vec::<LabelSelector>::new();
     let mut initial_pods = std::collections::HashSet::new();
 
     for (typ, nam) in &resource_specs {
         if let Some(name) = nam {
             if let Some(sel) = get_selector_from_resource(&client, typ, name, &namespace).await? {
                 all_selectors.push(sel.clone());
-                let lp = ListParams::default().labels(&sel);
+                let labels_str = selector_to_labels_string(&sel);
+                let lp = if let Some(s) = labels_str { ListParams::default().labels(&s) } else { ListParams::default() };
                 let pods = pods_api.list(&lp).await?;
                 for p in pods {
                     if p.status.as_ref().and_then(|s| s.phase.as_ref())
@@ -135,9 +137,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(sel) = &cli.selector {
-        all_selectors.push(sel.clone());
-        let lp = ListParams::default().labels(sel);
+    if let Some(sel_str) = &cli.selector {
+        let match_labels = parse_labels(sel_str);
+        let selector = LabelSelector {
+            match_labels: Some(match_labels),
+            match_expressions: None,
+        };
+        all_selectors.push(selector.clone());
+        let lp = ListParams::default().labels(sel_str);
         let pods = pods_api.list(&lp).await?;
         for p in pods {
             if p.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&"Running".to_string()) {
@@ -148,21 +155,78 @@ async fn main() -> anyhow::Result<()> {
 
     let mut pod_names: Vec<String> = initial_pods.into_iter().collect();
 
+    fn parse_labels(sel_str: &str) -> std::collections::BTreeMap<String, String> {
+        let mut map = std::collections::BTreeMap::new();
+        for pair in sel_str.split(',') {
+            let pair = pair.trim();
+            if let Some(eq_pos) = pair.find('=') {
+                let key = pair[..eq_pos].to_string();
+                let value = pair[eq_pos + 1..].to_string();
+                map.insert(key, value);
+            }
+        }
+        map
+    }
+
+    fn selector_to_labels_string(selector: &LabelSelector) -> Option<String> {
+        if let Some(labels) = &selector.match_labels {
+            if labels.is_empty() {
+                None
+            } else {
+                Some(labels.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(","))
+            }
+        } else {
+            None
+        }
+    }
+
     fn matches_selector(
         pod_labels: &std::collections::BTreeMap<String, String>,
-        selector: &str,
+        selector: &LabelSelector,
     ) -> bool {
-        for cond in selector.split(',') {
-            let cond = cond.trim();
-            if let Some(eq_pos) = cond.find('=') {
-                let key = &cond[..eq_pos];
-                let value = &cond[eq_pos + 1..];
-                if pod_labels.get(key) != Some(&value.to_string()) {
+        // Check match_labels
+        if let Some(match_labels) = &selector.match_labels {
+            for (key, value) in match_labels {
+                if pod_labels.get(key) != Some(value) {
                     return false;
                 }
-            } else {
-                // Assume exact match for simplicity
-                return false;
+            }
+        }
+        // Check match_expressions
+        if let Some(expressions) = &selector.match_expressions {
+            for expr in expressions {
+                let pod_value = pod_labels.get(&expr.key);
+                match expr.operator.as_str() {
+                    "In" => {
+                        if let Some(values) = &expr.values {
+                            if pod_value.is_none() || !values.contains(pod_value.unwrap()) {
+                                return false;
+                            }
+                        } else {
+                            return false; // No values for In
+                        }
+                    }
+                    "NotIn" => {
+                        if let Some(values) = &expr.values {
+                            if pod_value.is_some() && values.contains(pod_value.unwrap()) {
+                                return false;
+                            }
+                        } else {
+                            return false; // No values for NotIn
+                        }
+                    }
+                    "Exists" => {
+                        if pod_value.is_none() {
+                            return false;
+                        }
+                    }
+                    "DoesNotExist" => {
+                        if pod_value.is_some() {
+                            return false;
+                        }
+                    }
+                    _ => return false, // Unknown operator
+                }
             }
         }
         true

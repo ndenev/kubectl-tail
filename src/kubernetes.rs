@@ -4,7 +4,6 @@ use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::{Api, Client, api::LogParams};
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -44,19 +43,11 @@ impl HasSelector for k8s_openapi::api::batch::v1::Job {
     }
 }
 
-fn extract_labels(match_labels: &BTreeMap<String, String>) -> String {
-    match_labels
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 async fn get_selector_from_resource_generic<T>(
     client: &Client,
     name: &str,
     namespace: &str,
-) -> anyhow::Result<Option<String>>
+) -> anyhow::Result<Option<LabelSelector>>
 where
     T: k8s_openapi::Resource<Scope = k8s_openapi::NamespaceResourceScope>
         + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>
@@ -73,16 +64,7 @@ where
     let selector = res
         .get_selector()
         .ok_or_else(|| anyhow::anyhow!("No selector"))?;
-    if let Some(exprs) = &selector.match_expressions {
-        if !exprs.is_empty() {
-            eprintln!("Warning: matchExpressions not supported, using only matchLabels for {}", name);
-        }
-    }
-    let match_labels = selector
-        .match_labels
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No match_labels"))?;
-    Ok(Some(extract_labels(match_labels)))
+    Ok(Some(selector.clone()))
 }
 
 pub async fn get_selector_from_resource(
@@ -90,7 +72,7 @@ pub async fn get_selector_from_resource(
     resource_type: &str,
     name: &str,
     namespace: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<LabelSelector>> {
     match resource_type {
         "deployment" => {
             get_selector_from_resource_generic::<k8s_openapi::api::apps::v1::Deployment>(
