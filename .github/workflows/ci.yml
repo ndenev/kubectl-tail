@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ master ]
@@ -28,6 +31,8 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     if: github.event_name == 'release'
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
