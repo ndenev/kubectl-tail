@@ -59,15 +59,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_labels() {
-        let result = utils::parse_labels("app=nginx,version=v1");
-        let mut expected = std::collections::BTreeMap::new();
-        expected.insert("app".to_string(), "nginx".to_string());
-        expected.insert("version".to_string(), "v1".to_string());
-        assert_eq!(result, expected);
-    }
-
-    #[test]
     fn test_selector_to_labels_string() {
         let mut labels = std::collections::BTreeMap::new();
         labels.insert("app".to_string(), "nginx".to_string());
@@ -81,46 +72,9 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_selector_labels() {
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("app".to_string(), "nginx".to_string());
-        pod_labels.insert("version".to_string(), "v1".to_string());
-
-        let mut sel_labels = std::collections::BTreeMap::new();
-        sel_labels.insert("app".to_string(), "nginx".to_string());
-        let selector = LabelSelector {
-            match_labels: Some(sel_labels),
-            match_expressions: None,
-        };
-
-        assert!(utils::matches_selector(&pod_labels, &selector));
-    }
-
-    #[test]
-    fn test_matches_selector_expressions_in() {
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("env".to_string(), "prod".to_string());
-
+    fn test_selector_to_labels_string_includes_expressions() {
         let expr = LabelSelectorRequirement {
             key: "env".to_string(),
-            operator: "In".to_string(),
-            values: Some(vec!["prod".to_string(), "dev".to_string()]),
-        };
-        let selector = LabelSelector {
-            match_labels: None,
-            match_expressions: Some(vec![expr]),
-        };
-
-        assert!(utils::matches_selector(&pod_labels, &selector));
-    }
-
-    #[test]
-    fn test_matches_selector_expressions_exists() {
-        let mut pod_labels = std::collections::BTreeMap::new();
-        pod_labels.insert("app".to_string(), "nginx".to_string());
-
-        let expr = LabelSelectorRequirement {
-            key: "app".to_string(),
             operator: "Exists".to_string(),
             values: None,
         };
@@ -129,6 +83,7 @@ mod tests {
             match_expressions: Some(vec![expr]),
         };
 
-        assert!(utils::matches_selector(&pod_labels, &selector));
+        let result = utils::selector_to_labels_string(&selector);
+        assert_eq!(result, Some("env".to_string()));
     }
 }

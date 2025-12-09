@@ -7,17 +7,13 @@ mod utils;
 
 use clap::Parser;
 use crossterm::style::Stylize;
-use futures::stream::StreamExt;
+use futures::{TryStreamExt, stream::StreamExt};
 use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
-use kube::{
-    Api, Client, ResourceExt,
-    api::{ListParams, WatchParams},
-    config,
-};
+use kube::runtime::watcher::{Config as WatcherConfig, Event, watcher};
+use kube::{Api, Client, ResourceExt, config};
 use std::collections::HashMap;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::AbortHandle;
 
 use cli::Cli;
@@ -41,8 +37,6 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::try_from(config)?;
     let namespace = cli.namespace.as_deref().unwrap_or("default").to_string();
 
-    let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-
     if cli.resources.is_empty() && cli.selector.is_none() {
         eprintln!("Must specify at least one resource or a label selector (--selector)");
         std::process::exit(1);
@@ -60,52 +54,29 @@ async fn main() -> anyhow::Result<()> {
         resource_specs.push((typ, nam));
     }
 
-    let mut all_selectors = Vec::<LabelSelector>::new();
-    let mut initial_pods = std::collections::HashSet::new();
+    let mut label_selector_strings = Vec::<String>::new();
+    let mut explicit_pods = std::collections::HashSet::new();
 
     for (typ, nam) in &resource_specs {
         if let Some(name) = nam {
             if let Some(sel) = get_selector_from_resource(&client, typ, name, &namespace).await? {
-                all_selectors.push(sel.clone());
-                let labels_str = selector_to_labels_string(&sel);
-                let lp = if let Some(s) = labels_str {
-                    ListParams::default().labels(&s)
-                } else {
-                    ListParams::default()
-                };
-                let pods = pods_api.list(&lp).await?;
-                for p in pods {
-                    if p.status.as_ref().and_then(|s| s.phase.as_ref())
-                        == Some(&"Running".to_string())
-                    {
-                        initial_pods.insert(p.name_any());
-                    }
+                if let Some(sel_str) = selector_to_labels_string(&sel) {
+                    label_selector_strings.push(sel_str);
+                } else if cli.verbose {
+                    eprintln!(
+                        "Selector for resource {}/{} is empty; skipping server-side filtering",
+                        typ, name
+                    );
                 }
             } else if typ == "pod" {
-                initial_pods.insert(name.clone());
+                explicit_pods.insert(name.clone());
             }
         }
     }
 
     if let Some(sel_str) = &cli.selector {
-        let match_labels = parse_labels(sel_str);
-        let selector = LabelSelector {
-            match_labels: Some(match_labels),
-            match_expressions: None,
-        };
-        all_selectors.push(selector.clone());
-        let lp = ListParams::default().labels(sel_str);
-        let pods = pods_api.list(&lp).await?;
-        for p in pods {
-            if p.status.as_ref().and_then(|s| s.phase.as_ref()) == Some(&"Running".to_string()) {
-                initial_pods.insert(p.name_any());
-            }
-        }
+        label_selector_strings.push(sel_str.clone());
     }
-
-    let mut pod_names: Vec<String> = initial_pods.into_iter().collect();
-
-    println!("Found pods: {:?}", pod_names);
 
     // Channel for log messages
     let (tx, mut rx) = mpsc::channel::<LogMessage>(100);
@@ -119,145 +90,158 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // HashMap to store abort handles per pod (multiple per pod for multi-container)
-    let mut handles: HashMap<String, Vec<AbortHandle>> = HashMap::new();
+    // Track tail tasks per pod across watchers
+    let handles: Arc<Mutex<HashMap<String, Vec<AbortHandle>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
-    // Spawn tail tasks for initial pods
-    for name in &pod_names {
-        let pod_handles = spawn_tail_tasks_for_pod(
-            client.clone(),
-            name.clone(),
-            namespace.to_string(),
-            cli.container.clone(),
-            tx.clone(),
-            cli.tail,
-            cli.verbose,
-        )
-        .await;
-        handles.insert(name.clone(), pod_handles);
+    for selector in label_selector_strings {
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+        let handles = handles.clone();
+        let tx = tx.clone();
+        let namespace = namespace.clone();
+        let container = cli.container.clone();
+        let client = client.clone();
+        let verbose = cli.verbose;
+        tokio::spawn(async move {
+            let cfg = WatcherConfig::default().labels(&selector);
+            if verbose {
+                eprintln!("Starting watcher for selector: {}", selector);
+            }
+            if let Err(err) = watch_pods(
+                pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
+            )
+            .await && verbose
+            {
+                eprintln!("Watcher with selector {} stopped: {}", selector, err);
+            }
+        });
     }
 
-    // Start watching for pod changes
-    let all_selectors_clone = all_selectors.clone();
-    let verbose = cli.verbose;
-    tokio::spawn(async move {
-        let wp = WatchParams::default();
-        loop {
-            match pods_api.watch(&wp, "0").await {
-                Ok(w) => {
-                    let mut watcher = w.boxed();
-                    while let Some(event) = watcher.next().await {
-                        match event {
-                            Ok(kube::api::WatchEvent::Added(pod)) => {
-                                let name = pod.name_any();
-                                if pod.status.as_ref().and_then(|s| s.phase.as_ref())
-                                    == Some(&"Running".to_string())
-                                    && !pod_names.contains(&name)
-                                {
-                                    let labels = pod.metadata.labels.as_ref();
-                                    if !all_selectors_clone.is_empty()
-                                        && labels.is_some_and(|l| {
-                                            all_selectors_clone
-                                                .iter()
-                                                .any(|sel| matches_selector(l, sel))
-                                        })
-                                    {
-                                        pod_names.push(name.clone());
-                                        if verbose {
-                                            println!("New pod added: {}", name);
-                                        }
-                                        let pod_handles = spawn_tail_tasks_for_pod(
-                                            client.clone(),
-                                            name.clone(),
-                                            namespace.to_string(),
-                                            cli.container.clone(),
-                                            tx.clone(),
-                                            cli.tail,
-                                            verbose,
-                                        )
-                                        .await;
-                                        handles.insert(name.clone(), pod_handles);
-                                    }
-                                }
-                            }
-                            Ok(kube::api::WatchEvent::Deleted(pod)) => {
-                                let name = pod.name_any();
-                                pod_names.retain(|n| n != &name);
-                                if verbose {
-                                    println!("Pod deleted: {}", name);
-                                }
-                                if let Some(pod_handles) = handles.remove(&name) {
-                                    for handle in pod_handles {
-                                        handle.abort();
-                                    }
-                                }
-                            }
-                            Ok(kube::api::WatchEvent::Modified(pod)) => {
-                                let name = pod.name_any();
-                                let is_running = pod.status.as_ref().and_then(|s| s.phase.as_ref())
-                                    == Some(&"Running".to_string());
-                                let is_in_list = pod_names.contains(&name);
-                                if is_running && !is_in_list {
-                                    let labels = pod.metadata.labels.as_ref();
-                                    if !all_selectors_clone.is_empty()
-                                        && labels.is_some_and(|l| {
-                                            all_selectors_clone
-                                                .iter()
-                                                .any(|sel| matches_selector(l, sel))
-                                        })
-                                    {
-                                        pod_names.push(name.clone());
-                                        if verbose {
-                                            println!("Pod became running: {}", name);
-                                        }
-                                        let pod_handles = spawn_tail_tasks_for_pod(
-                                            client.clone(),
-                                            name.clone(),
-                                            namespace.to_string(),
-                                            cli.container.clone(),
-                                            tx.clone(),
-                                            cli.tail,
-                                            verbose,
-                                        )
-                                        .await;
-                                        handles.insert(name.clone(), pod_handles);
-                                    }
-                                } else if !is_running && is_in_list {
-                                    pod_names.retain(|n| n != &name);
-                                    if verbose {
-                                        println!("Pod stopped running: {}", name);
-                                    }
-                                    if let Some(pod_handles) = handles.remove(&name) {
-                                        for handle in pod_handles {
-                                            handle.abort();
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if verbose {
-                                    eprintln!("Watch error: {}, retrying", e);
-                                }
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if verbose {
-                        eprintln!("Watch stream ended, retrying in 5 seconds");
-                    }
-                }
-                Err(e) => {
-                    if verbose {
-                        eprintln!("Failed to start pod watch: {}, retrying in 5 seconds", e);
-                    }
-                }
+    for pod_name in explicit_pods {
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+        let handles = handles.clone();
+        let tx = tx.clone();
+        let namespace = namespace.clone();
+        let container = cli.container.clone();
+        let client = client.clone();
+        let verbose = cli.verbose;
+        tokio::spawn(async move {
+            let field_selector = format!("metadata.name={}", pod_name);
+            let cfg = WatcherConfig::default().fields(&field_selector);
+            if verbose {
+                eprintln!("Starting watcher for pod: {}", pod_name);
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
+            if let Err(err) = watch_pods(
+                pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
+            )
+            .await && verbose
+            {
+                eprintln!("Watcher for pod {} stopped: {}", pod_name, err);
+            }
+        });
+    }
 
     // Wait for interrupt signal to keep the program running
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn watch_pods(
+    pods_api: Api<Pod>,
+    cfg: WatcherConfig,
+    handles: Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>,
+    client: Client,
+    namespace: String,
+    container: Option<String>,
+    tx: mpsc::Sender<LogMessage>,
+    tail: Option<i64>,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let mut stream = watcher(pods_api, cfg).boxed();
+    while let Some(event) = stream.try_next().await? {
+        match event {
+            Event::Apply(pod) | Event::InitApply(pod) => {
+                handle_running_pod(
+                    pod,
+                    &handles,
+                    client.clone(),
+                    namespace.clone(),
+                    container.clone(),
+                    tx.clone(),
+                    tail,
+                    verbose,
+                )
+                .await;
+            }
+            Event::Delete(pod) => stop_tailing_pod(&pod.name_any(), &handles, verbose).await,
+            Event::Init | Event::InitDone => {}
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_running_pod(
+    pod: Pod,
+    handles: &Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>,
+    client: Client,
+    namespace: String,
+    container: Option<String>,
+    tx: mpsc::Sender<LogMessage>,
+    tail: Option<i64>,
+    verbose: bool,
+) {
+    let name = pod.name_any();
+    let is_running = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.phase.as_ref())
+        .map(|p| p == "Running")
+        .unwrap_or(false);
+
+    if !is_running {
+        stop_tailing_pod(&name, handles, verbose).await;
+        return;
+    }
+
+    {
+        let guard = handles.lock().await;
+        if guard.contains_key(&name) {
+            return;
+        }
+    }
+
+    let pod_handles = spawn_tail_tasks_for_pod(
+        client,
+        name.clone(),
+        namespace,
+        container,
+        tx,
+        tail,
+        verbose,
+    )
+    .await;
+
+    let mut guard = handles.lock().await;
+    guard.insert(name.clone(), pod_handles);
+    if verbose {
+        eprintln!("Started tailing pod {}", name);
+    }
+}
+
+async fn stop_tailing_pod(
+    name: &str,
+    handles: &Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>,
+    verbose: bool,
+) {
+    let mut guard = handles.lock().await;
+    if let Some(pod_handles) = guard.remove(name) {
+        if verbose {
+            eprintln!("Stopping tail for pod {}", name);
+        }
+        for handle in pod_handles {
+            handle.abort();
+        }
+    }
 }
