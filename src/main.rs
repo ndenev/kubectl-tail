@@ -7,7 +7,6 @@ mod ui;
 mod utils;
 
 use clap::Parser;
-use crossterm::style::Stylize;
 use futures::{TryStreamExt, stream::StreamExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::watcher::{Config as WatcherConfig, Event, watcher};
@@ -26,8 +25,8 @@ use utils::*;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Determine UI mode - use TUI unless explicitly disabled or output is redirected
-    let use_tui = !cli.plain_output && atty::is(atty::Stream::Stdout);
+    // Use TUI only when explicitly requested and output is a terminal
+    let use_tui = cli.tui && atty::is(atty::Stream::Stdout);
 
     if use_tui {
         run_tui_mode(cli).await
@@ -95,28 +94,34 @@ async fn run_plain_mode(cli: Cli) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<LogEvent>(1000);
 
     // Spawn task to print logs in plain mode
+    let verbose = cli.verbose;
     tokio::spawn(async move {
+        use std::io::{self, Write};
         while let Some(event) = rx.recv().await {
             match event {
                 LogEvent::Log(msg) => {
-                    let color = get_color(&msg.pod_name);
-                    let prefix = format!("[{}/{}]", msg.pod_name, msg.container_name).with(color);
+                    // Use only stdout and avoid color codes in plain mode
+                    let prefix = format!("[{}/{}]", msg.pod_name, msg.container_name);
                     println!("{} {}", prefix, msg.line);
+                    let _ = io::stdout().flush();
                 },
                 LogEvent::Gap { duration, reason, pod, container } => {
-                    if cli.verbose {
-                        eprintln!("⚠️  LOG GAP: {}/{} missing {:.1}s of logs ({:?})",
-                                 pod, container, duration.as_secs_f32(), reason);
+                    if verbose {
+                        println!("WARNING: LOG GAP: {}/{} missing {:.1}s of logs ({:?})",
+                                pod, container, duration.as_secs_f32(), reason);
+                        let _ = io::stdout().flush();
                     }
                 },
                 LogEvent::StatusChange { pod, container, new_state, .. } => {
-                    if cli.verbose {
-                        eprintln!("🔄 Status: {}/{} is now {:?}", pod, container, new_state);
+                    if verbose {
+                        println!("STATUS: {}/{} is now {:?}", pod, container, new_state);
+                        let _ = io::stdout().flush();
                     }
                 },
                 LogEvent::SystemMessage { message, .. } => {
-                    if cli.verbose {
-                        eprintln!("ℹ️  {}", message);
+                    if verbose {
+                        println!("INFO: {}", message);
+                        let _ = io::stdout().flush();
                     }
                 },
             }

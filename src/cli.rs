@@ -31,9 +31,9 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Use plain text output instead of TUI (useful for piping)
+    /// Enable TUI mode with interactive interface and gap detection
     #[arg(long)]
-    pub plain_output: bool,
+    pub tui: bool,
 
     /// Maximum number of log lines to keep in memory for TUI mode
     #[arg(long, default_value = "10000")]

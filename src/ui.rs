@@ -440,6 +440,11 @@ pub async fn run_tui(
     auto_scroll: bool,
     mut event_rx: mpsc::Receiver<LogEvent>,
 ) -> anyhow::Result<()> {
+    // Verify we're in a proper terminal environment
+    if !atty::is(atty::Stream::Stdout) {
+        return Err(anyhow::anyhow!("TUI mode requires a terminal (stdout is not a tty)"));
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
