@@ -30,4 +30,16 @@ pub struct Cli {
     /// Enable verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Use plain text output instead of TUI (useful for piping)
+    #[arg(long)]
+    pub plain_output: bool,
+
+    /// Maximum number of log lines to keep in memory for TUI mode
+    #[arg(long, default_value = "10000")]
+    pub buffer_size: usize,
+
+    /// Auto-scroll to follow new logs in TUI mode
+    #[arg(long, default_value = "true")]
+    pub auto_scroll: bool,
 }

@@ -1,13 +1,13 @@
-use crate::types::LogMessage;
+use crate::types::{LogMessage, LogEvent, GapReason, ConnectionState};
 use futures::io::AsyncBufReadExt;
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::{Api, Client, api::LogParams};
 use std::fmt::Debug;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
+use std::time::{Duration, SystemTime};
 
 trait HasSelector {
     fn get_selector(&self) -> Option<&LabelSelector>;
@@ -114,7 +114,7 @@ pub async fn spawn_tail_tasks_for_pod(
     pod_name: String,
     namespace: String,
     container: Option<String>,
-    tx: mpsc::Sender<LogMessage>,
+    tx: mpsc::Sender<LogEvent>,
     tail: Option<i64>,
     verbose: bool,
 ) -> Vec<AbortHandle> {
@@ -159,7 +159,7 @@ pub fn spawn_tail_task(
     pod_name: String,
     namespace: String,
     container_name: String,
-    tx: mpsc::Sender<LogMessage>,
+    tx: mpsc::Sender<LogEvent>,
     tail: Option<i64>,
     verbose: bool,
 ) -> AbortHandle {
@@ -173,10 +173,14 @@ pub fn spawn_tail_task(
             );
         }
         let mut is_first_attempt = true;
+        let mut reconnection_attempt = 0;
+        let mut disconnection_time: Option<SystemTime> = None;
+
         loop {
             // Follow logs with tail only on first attempt to avoid replay
             let tail_lines = if is_first_attempt { tail } else { None };
             is_first_attempt = false;
+            reconnection_attempt += 1;
             let lp_follow = LogParams {
                 follow: true,
                 container: Some(container_name.clone()),
@@ -185,16 +189,38 @@ pub fn spawn_tail_task(
             };
             match api.log_stream(&pod_name, &lp_follow).await {
                 Ok(stream) => {
+                    // Connection successful - emit status change and reset counters
+                    if reconnection_attempt > 1 {
+                        if let Some(disconnect_time) = disconnection_time.take() {
+                            let downtime = SystemTime::now().duration_since(disconnect_time).unwrap_or_default();
+                            let _ = tx.send(LogEvent::Gap {
+                                duration: downtime,
+                                reason: GapReason::StreamEnded,
+                                pod: pod_name.clone(),
+                                container: container_name.clone(),
+                            }).await;
+                        }
+
+                        let _ = tx.send(LogEvent::StatusChange {
+                            pod: pod_name.clone(),
+                            container: container_name.clone(),
+                            old_state: ConnectionState::Reconnecting { attempt: reconnection_attempt - 1 },
+                            new_state: ConnectionState::Connected,
+                        }).await;
+                    }
+
+                    reconnection_attempt = 0;
                     let mut line_stream = stream.lines();
+
                     while let Some(line_result) = line_stream.next().await {
                         match line_result {
                             Ok(line) => {
-                                let msg = LogMessage {
-                                    pod_name: pod_name.clone(),
-                                    container_name: container_name.clone(),
+                                let msg = LogMessage::new(
+                                    pod_name.clone(),
+                                    container_name.clone(),
                                     line,
-                                };
-                                if tx.send(msg).await.is_err() {
+                                );
+                                if tx.send(LogEvent::Log(msg)).await.is_err() {
                                     return;
                                 }
                             }
@@ -209,7 +235,15 @@ pub fn spawn_tail_task(
                             }
                         }
                     }
-                    // If stream ended, retry
+                    // If stream ended, mark disconnection and retry
+                    disconnection_time = Some(SystemTime::now());
+                    let _ = tx.send(LogEvent::StatusChange {
+                        pod: pod_name.clone(),
+                        container: container_name.clone(),
+                        old_state: ConnectionState::Connected,
+                        new_state: ConnectionState::Reconnecting { attempt: 1 },
+                    }).await;
+
                     if verbose {
                         eprintln!(
                             "Log stream ended for pod {}/{}, retrying in 5 seconds",
@@ -218,17 +252,40 @@ pub fn spawn_tail_task(
                     }
                 }
                 Err(e) => {
-                    if let kube::Error::Api(err) = &e
-                        && err.code == 404
-                    {
-                        if verbose {
-                            eprintln!(
-                                "Pod {}/{} not found (404), stopping tail",
-                                pod_name, container_name
-                            );
-                        }
-                        return;
+                    // Mark disconnection if first error
+                    if disconnection_time.is_none() {
+                        disconnection_time = Some(SystemTime::now());
                     }
+
+                    let _gap_reason = if let kube::Error::Api(err) = &e {
+                        if err.code == 404 {
+                            let _ = tx.send(LogEvent::StatusChange {
+                                pod: pod_name.clone(),
+                                container: container_name.clone(),
+                                old_state: ConnectionState::Connected,
+                                new_state: ConnectionState::Failed("Pod not found".to_string()),
+                            }).await;
+
+                            if verbose {
+                                eprintln!(
+                                    "Pod {}/{} not found (404), stopping tail",
+                                    pod_name, container_name
+                                );
+                            }
+                            return;
+                        }
+                        GapReason::ApiServerError(err.code)
+                    } else {
+                        GapReason::NetworkError(e.to_string())
+                    };
+
+                    let _ = tx.send(LogEvent::StatusChange {
+                        pod: pod_name.clone(),
+                        container: container_name.clone(),
+                        old_state: ConnectionState::Connected,
+                        new_state: ConnectionState::Reconnecting { attempt: reconnection_attempt },
+                    }).await;
+
                     if verbose {
                         eprintln!(
                             "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",

@@ -3,6 +3,7 @@ mod kubernetes;
 #[cfg(test)]
 mod tests;
 mod types;
+mod ui;
 mod utils;
 
 use clap::Parser;
@@ -18,12 +19,24 @@ use tokio::task::AbortHandle;
 
 use cli::Cli;
 use kubernetes::{get_selector_from_resource, spawn_tail_tasks_for_pod};
-use types::LogMessage;
+use types::LogEvent;
 use utils::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Determine UI mode - use TUI unless explicitly disabled or output is redirected
+    let use_tui = !cli.plain_output && atty::is(atty::Stream::Stdout);
+
+    if use_tui {
+        run_tui_mode(cli).await
+    } else {
+        run_plain_mode(cli).await
+    }
+}
+
+async fn run_plain_mode(cli: Cli) -> anyhow::Result<()> {
 
     let config = if let Some(ctx) = &cli.context {
         config::Config::from_kubeconfig(&config::KubeConfigOptions {
@@ -78,15 +91,35 @@ async fn main() -> anyhow::Result<()> {
         label_selector_strings.push(sel_str.clone());
     }
 
-    // Channel for log messages
-    let (tx, mut rx) = mpsc::channel::<LogMessage>(100);
+    // Channel for log events
+    let (tx, mut rx) = mpsc::channel::<LogEvent>(1000);
 
-    // Spawn task to print logs
+    // Spawn task to print logs in plain mode
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let color = get_color(&msg.pod_name);
-            let prefix = format!("[{}/{}]", msg.pod_name, msg.container_name).with(color);
-            println!("{} {}", prefix, msg.line);
+        while let Some(event) = rx.recv().await {
+            match event {
+                LogEvent::Log(msg) => {
+                    let color = get_color(&msg.pod_name);
+                    let prefix = format!("[{}/{}]", msg.pod_name, msg.container_name).with(color);
+                    println!("{} {}", prefix, msg.line);
+                },
+                LogEvent::Gap { duration, reason, pod, container } => {
+                    if cli.verbose {
+                        eprintln!("⚠️  LOG GAP: {}/{} missing {:.1}s of logs ({:?})",
+                                 pod, container, duration.as_secs_f32(), reason);
+                    }
+                },
+                LogEvent::StatusChange { pod, container, new_state, .. } => {
+                    if cli.verbose {
+                        eprintln!("🔄 Status: {}/{} is now {:?}", pod, container, new_state);
+                    }
+                },
+                LogEvent::SystemMessage { message, .. } => {
+                    if cli.verbose {
+                        eprintln!("ℹ️  {}", message);
+                    }
+                },
+            }
         }
     });
 
@@ -146,6 +179,120 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_tui_mode(cli: Cli) -> anyhow::Result<()> {
+    let config = if let Some(ctx) = &cli.context {
+        config::Config::from_kubeconfig(&config::KubeConfigOptions {
+            context: Some(ctx.clone()),
+            ..Default::default()
+        })
+        .await?
+    } else {
+        config::Config::infer().await?
+    };
+    let client = Client::try_from(config)?;
+    let namespace = cli.namespace.as_deref().unwrap_or("default").to_string();
+
+    if cli.resources.is_empty() && cli.selector.is_none() {
+        eprintln!("Must specify at least one resource or a label selector (--selector)");
+        std::process::exit(1);
+    }
+
+    let mut resource_specs = vec![];
+    for res in &cli.resources {
+        let (typ, nam) = if let Some(slash_pos) = res.find('/') {
+            let typ = res[..slash_pos].to_string();
+            let nam = res[slash_pos + 1..].to_string();
+            (typ, Some(nam))
+        } else {
+            ("pod".to_string(), Some(res.clone()))
+        };
+        resource_specs.push((typ, nam));
+    }
+
+    let mut label_selector_strings = Vec::<String>::new();
+    let mut explicit_pods = std::collections::HashSet::new();
+
+    for (typ, nam) in &resource_specs {
+        if let Some(name) = nam {
+            if let Some(sel) = get_selector_from_resource(&client, typ, name, &namespace).await? {
+                if let Some(sel_str) = selector_to_labels_string(&sel) {
+                    label_selector_strings.push(sel_str);
+                } else if cli.verbose {
+                    eprintln!(
+                        "Selector for resource {}/{} is empty; skipping server-side filtering",
+                        typ, name
+                    );
+                }
+            } else if typ == "pod" {
+                explicit_pods.insert(name.clone());
+            }
+        }
+    }
+
+    if let Some(sel_str) = &cli.selector {
+        label_selector_strings.push(sel_str.clone());
+    }
+
+    // Channel for log events
+    let (tx, rx) = mpsc::channel::<LogEvent>(cli.buffer_size);
+
+    // Track tail tasks per pod across watchers
+    let handles: Arc<Mutex<HashMap<String, Vec<AbortHandle>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Start watchers for label selectors
+    for selector in label_selector_strings {
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+        let handles = handles.clone();
+        let tx = tx.clone();
+        let namespace = namespace.clone();
+        let container = cli.container.clone();
+        let client = client.clone();
+        let verbose = cli.verbose;
+        tokio::spawn(async move {
+            let cfg = WatcherConfig::default().labels(&selector);
+            if verbose {
+                eprintln!("Starting watcher for selector: {}", selector);
+            }
+            if let Err(err) = watch_pods(
+                pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
+            )
+            .await && verbose
+            {
+                eprintln!("Watcher with selector {} stopped: {}", selector, err);
+            }
+        });
+    }
+
+    // Start watchers for explicit pods
+    for pod_name in explicit_pods {
+        let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+        let handles = handles.clone();
+        let tx = tx.clone();
+        let namespace = namespace.clone();
+        let container = cli.container.clone();
+        let client = client.clone();
+        let verbose = cli.verbose;
+        tokio::spawn(async move {
+            let field_selector = format!("metadata.name={}", pod_name);
+            let cfg = WatcherConfig::default().fields(&field_selector);
+            if verbose {
+                eprintln!("Starting watcher for pod: {}", pod_name);
+            }
+            if let Err(err) = watch_pods(
+                pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
+            )
+            .await && verbose
+            {
+                eprintln!("Watcher for pod {} stopped: {}", pod_name, err);
+            }
+        });
+    }
+
+    // Start TUI
+    ui::run_tui(cli.buffer_size, cli.auto_scroll, rx).await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn watch_pods(
     pods_api: Api<Pod>,
@@ -154,7 +301,7 @@ async fn watch_pods(
     client: Client,
     namespace: String,
     container: Option<String>,
-    tx: mpsc::Sender<LogMessage>,
+    tx: mpsc::Sender<LogEvent>,
     tail: Option<i64>,
     verbose: bool,
 ) -> anyhow::Result<()> {
@@ -188,7 +335,7 @@ async fn handle_running_pod(
     client: Client,
     namespace: String,
     container: Option<String>,
-    tx: mpsc::Sender<LogMessage>,
+    tx: mpsc::Sender<LogEvent>,
     tail: Option<i64>,
     verbose: bool,
 ) {
