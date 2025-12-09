@@ -186,7 +186,7 @@ async fn watch_pods(
                     .unwrap_or_else(|| "now".to_string());
 
                 eprintln!(
-                    "🗑️  POD DELETED: {} | Deletion time: {}",
+                    "🗑️ POD DELETED: {} | Deletion time: {}",
                     name, deletion_time
                 );
                 stop_tailing_pod(&name, &handles, verbose).await;
