@@ -173,22 +173,71 @@ pub fn spawn_tail_task(
             );
         }
         let mut is_first_attempt = true;
+        let mut last_log_time: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut recent_logs: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(10);
+
         loop {
-            // Follow logs with tail only on first attempt to avoid replay
-            let tail_lines = if is_first_attempt { tail } else { None };
-            is_first_attempt = false;
-            let lp_follow = LogParams {
-                follow: true,
-                container: Some(container_name.clone()),
-                tail_lines,
-                ..Default::default()
+            let is_reconnection = !is_first_attempt;
+            let lp_follow = if is_first_attempt {
+                // First attempt: use user-specified tail
+                is_first_attempt = false;
+                LogParams {
+                    follow: true,
+                    container: Some(container_name.clone()),
+                    tail_lines: tail,
+                    ..Default::default()
+                }
+            } else {
+                // Reconnection: use sinceTime to avoid replay
+                if let Some(since_time) = last_log_time {
+                    // Add 1 second to avoid getting the exact same log line again
+                    let since_time_plus = since_time + chrono::Duration::seconds(1);
+                    LogParams {
+                        follow: true,
+                        container: Some(container_name.clone()),
+                        since_time: Some(since_time_plus),
+                        ..Default::default()
+                    }
+                } else {
+                    // Fallback: no tail to minimize replay
+                    LogParams {
+                        follow: true,
+                        container: Some(container_name.clone()),
+                        tail_lines: Some(0), // Get no historical logs on reconnect
+                        ..Default::default()
+                    }
+                }
             };
             match api.log_stream(&pod_name, &lp_follow).await {
                 Ok(stream) => {
+                    if is_reconnection && verbose {
+                        if last_log_time.is_some() {
+                            eprintln!("🔄 Reconnected to {}/{} using sinceTime (no replay)", pod_name, container_name);
+                        } else {
+                            eprintln!("🔄 Reconnected to {}/{} with no tail (minimal replay)", pod_name, container_name);
+                        }
+                    }
                     let mut line_stream = stream.lines();
                     while let Some(line_result) = line_stream.next().await {
                         match line_result {
                             Ok(line) => {
+                                // Simple deduplication: skip if we've seen this exact log line recently
+                                if is_reconnection && recent_logs.contains(&line) {
+                                    if verbose {
+                                        eprintln!("🔄 Skipping duplicate log line on reconnection for {}/{}", pod_name, container_name);
+                                    }
+                                    continue;
+                                }
+
+                                // Track recent log lines for deduplication (keep last 10)
+                                recent_logs.push_back(line.clone());
+                                if recent_logs.len() > 10 {
+                                    recent_logs.pop_front();
+                                }
+
+                                // Update last log time to current time for reconnection purposes
+                                last_log_time = Some(chrono::Utc::now());
+
                                 let msg = LogMessage {
                                     pod_name: pod_name.clone(),
                                     container_name: container_name.clone(),
