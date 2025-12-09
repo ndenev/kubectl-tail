@@ -110,7 +110,8 @@ async fn main() -> anyhow::Result<()> {
             if let Err(err) = watch_pods(
                 pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
             )
-            .await && verbose
+            .await
+                && verbose
             {
                 eprintln!("Watcher with selector {} stopped: {}", selector, err);
             }
@@ -134,7 +135,8 @@ async fn main() -> anyhow::Result<()> {
             if let Err(err) = watch_pods(
                 pods_api, cfg, handles, client, namespace, container, tx, cli.tail, verbose,
             )
-            .await && verbose
+            .await
+                && verbose
             {
                 eprintln!("Watcher for pod {} stopped: {}", pod_name, err);
             }
@@ -162,7 +164,7 @@ async fn watch_pods(
     while let Some(event) = stream.try_next().await? {
         match event {
             Event::Apply(pod) | Event::InitApply(pod) => {
-                handle_running_pod(
+                handle_pod_event(
                     pod,
                     &handles,
                     client.clone(),
@@ -174,15 +176,37 @@ async fn watch_pods(
                 )
                 .await;
             }
-            Event::Delete(pod) => stop_tailing_pod(&pod.name_any(), &handles, verbose).await,
-            Event::Init | Event::InitDone => {}
+            Event::Delete(pod) => {
+                let name = pod.name_any();
+                let deletion_time = pod
+                    .metadata
+                    .deletion_timestamp
+                    .as_ref()
+                    .map(|t| t.0.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| "now".to_string());
+
+                eprintln!(
+                    "🗑️  POD DELETED: {} | Deletion time: {}",
+                    name, deletion_time
+                );
+                stop_tailing_pod(&name, &handles, verbose).await;
+            }
+            Event::Init => {
+                eprintln!("🔄 Initializing pod watcher for namespace: {}", namespace);
+            }
+            Event::InitDone => {
+                eprintln!(
+                    "✅ Pod watcher initialization complete for namespace: {}",
+                    namespace
+                );
+            }
         }
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_running_pod(
+async fn handle_pod_event(
     pod: Pod,
     handles: &Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>,
     client: Client,
@@ -193,23 +217,96 @@ async fn handle_running_pod(
     verbose: bool,
 ) {
     let name = pod.name_any();
-    let is_running = pod
+    let phase = pod
         .status
         .as_ref()
         .and_then(|s| s.phase.as_ref())
-        .map(|p| p == "Running")
-        .unwrap_or(false);
+        .unwrap_or(&"Unknown".to_string())
+        .clone();
 
-    if !is_running {
-        stop_tailing_pod(&name, handles, verbose).await;
-        return;
-    }
+    let is_running = phase == "Running";
+    let is_terminating = pod.metadata.deletion_timestamp.is_some();
 
+    // Check if this is a pod state change
     {
         let guard = handles.lock().await;
-        if guard.contains_key(&name) {
+        let was_tracking = guard.contains_key(&name);
+
+        if !was_tracking && (is_running || phase == "Pending") {
+            // This is a new pod we haven't seen before
+            // (Continue with new pod logging below)
+        } else if was_tracking && !is_running {
+            // Pod state changed from running to non-running
+            if is_terminating {
+                eprintln!(
+                    "🟡 POD TERMINATING: {} | Phase: {} | Finalizing...",
+                    name, phase
+                );
+            } else {
+                eprintln!(
+                    "⚠️  POD STATUS CHANGED: {} | Phase: {} | Stopped tailing",
+                    name, phase
+                );
+            }
+            drop(guard); // Release lock before calling stop_tailing_pod
+            stop_tailing_pod(&name, handles, verbose).await;
+            return;
+        } else if was_tracking {
+            // We're already tracking this running pod, no need to log again
+            return;
+        } else {
+            // Pod exists but not running and we weren't tracking it
+            if verbose {
+                eprintln!("📋 POD STATUS: {} | Phase: {} | Not tailing", name, phase);
+            }
             return;
         }
+    }
+
+    // This is a new pod - log detailed information
+    let creation_time = pod
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let restart_count = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .map(|statuses| statuses.iter().map(|cs| cs.restart_count).sum::<i32>())
+        .unwrap_or(0);
+
+    let age = pod
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| {
+            let now = chrono::Utc::now();
+            let created = t.0;
+            let duration = now.signed_duration_since(created);
+            format_duration(duration)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let node = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.node_name.as_ref())
+        .map(|n| n.as_str())
+        .unwrap_or("unscheduled");
+
+    if phase == "Pending" {
+        eprintln!(
+            "🟡 NEW POD: {} | Phase: {} | Age: {} | Node: {} | Created: {}",
+            name, phase, age, node, creation_time
+        );
+    } else {
+        eprintln!(
+            "🔵 NEW POD: {} | Phase: {} | Age: {} | Restarts: {} | Node: {} | Created: {}",
+            name, phase, age, restart_count, node, creation_time
+        );
     }
 
     let pod_handles = spawn_tail_tasks_for_pod(
@@ -226,22 +323,38 @@ async fn handle_running_pod(
     let mut guard = handles.lock().await;
     guard.insert(name.clone(), pod_handles);
     if verbose {
-        eprintln!("Started tailing pod {}", name);
+        eprintln!("✅ Started tailing pod {}", name);
     }
 }
 
 async fn stop_tailing_pod(
     name: &str,
     handles: &Arc<Mutex<HashMap<String, Vec<AbortHandle>>>>,
-    verbose: bool,
+    _verbose: bool,
 ) {
     let mut guard = handles.lock().await;
     if let Some(pod_handles) = guard.remove(name) {
-        if verbose {
-            eprintln!("Stopping tail for pod {}", name);
-        }
+        eprintln!("🔴 POD REMOVED: {} | Stopped tailing logs", name);
         for handle in pod_handles {
             handle.abort();
         }
+    }
+}
+
+/// Format a duration in a human-readable way
+fn format_duration(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds();
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        format!("{}m{}s", total_secs / 60, total_secs % 60)
+    } else if total_secs < 86400 {
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        format!("{}h{}m", hours, minutes)
+    } else {
+        let days = total_secs / 86400;
+        let hours = (total_secs % 86400) / 3600;
+        format!("{}d{}h", days, hours)
     }
 }
