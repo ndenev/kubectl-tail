@@ -9,16 +9,25 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, StatefulWidget, Widget, Wrap},
 };
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct PodList<'a> {
     pods: &'a [PodInfo],
     states: &'a HashMap<PodKey, PodState>,
+    expanded_nodes: &'a HashSet<String>,
 }
 
 impl<'a> PodList<'a> {
-    pub fn new(pods: &'a [PodInfo], states: &'a HashMap<PodKey, PodState>) -> Self {
-        Self { pods, states }
+    pub fn new(
+        pods: &'a [PodInfo],
+        states: &'a HashMap<PodKey, PodState>,
+        expanded_nodes: &'a HashSet<String>,
+    ) -> Self {
+        Self {
+            pods,
+            states,
+            expanded_nodes,
+        }
     }
 }
 
@@ -26,35 +35,171 @@ impl<'a> StatefulWidget for PodList<'a> {
     type State = ratatui::widgets::ListState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let items: Vec<ListItem> = self
-            .pods
-            .iter()
-            .map(|pod| {
-                let enabled = self.states.get(&pod.key).map(|s| s.enabled).unwrap_or(true);
-                let checkbox = if enabled { "[x]" } else { "[ ]" };
+        use std::collections::BTreeMap;
 
-                // Format: [x] cluster/pod/container (phase)
-                let text = format!(
-                    "{} {}/{}/{} ({})",
-                    checkbox, pod.key.cluster, pod.key.pod_name, pod.key.container_name, pod.phase
-                );
+        // Group pods by cluster -> namespace -> pod -> containers
+        let mut tree: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&PodInfo>>>> =
+            BTreeMap::new();
 
-                let style = if enabled {
-                    Style::default()
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+        for pod in self.pods {
+            tree.entry(pod.key.cluster.clone())
+                .or_default()
+                .entry(pod.key.namespace.clone())
+                .or_default()
+                .entry(pod.key.pod_name.clone())
+                .or_default()
+                .push(pod);
+        }
 
-                ListItem::new(text).style(style)
-            })
-            .collect();
+        // Helper function to calculate selection state for a group of containers
+        let calc_selection_state = |containers: &[&PodInfo]| -> (usize, usize) {
+            let total = containers.len();
+            let enabled = containers
+                .iter()
+                .filter(|c| {
+                    self.states
+                        .get(&c.key)
+                        .map(|s| s.enabled)
+                        .unwrap_or(true)
+                })
+                .count();
+            (enabled, total)
+        };
+
+        // Build flat list with tree structure
+        let mut items: Vec<ListItem> = Vec::new();
+
+        for (cluster, namespaces) in &tree {
+            // Calculate cluster selection state
+            let mut cluster_enabled = 0;
+            let mut cluster_total = 0;
+            for pods in namespaces.values() {
+                for containers in pods.values() {
+                    let (enabled, total) = calc_selection_state(containers);
+                    cluster_enabled += enabled;
+                    cluster_total += total;
+                }
+            }
+
+            // Determine cluster style based on selection state
+            let cluster_style = if cluster_total == 0 {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if cluster_enabled == 0 {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else if cluster_enabled < cluster_total {
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            };
+
+            // Cluster header
+            let cluster_expanded = self.expanded_nodes.contains(cluster);
+            let cluster_icon = if cluster_expanded { "▼" } else { "▶" };
+            items.push(
+                ListItem::new(format!("{} {}", cluster_icon, cluster)).style(cluster_style),
+            );
+
+            // Only show children if cluster is expanded
+            if cluster_expanded {
+                for (namespace, pods) in namespaces {
+                    // Calculate namespace selection state
+                    let mut ns_enabled = 0;
+                    let mut ns_total = 0;
+                    for containers in pods.values() {
+                        let (enabled, total) = calc_selection_state(containers);
+                        ns_enabled += enabled;
+                        ns_total += total;
+                    }
+
+                    let ns_style = if ns_total == 0 {
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                    } else if ns_enabled == 0 {
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
+                    } else if ns_enabled < ns_total {
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                    };
+
+                    // Namespace header (indented)
+                    let ns_path = format!("{}/{}", cluster, namespace);
+                    let ns_expanded = self.expanded_nodes.contains(&ns_path);
+                    let ns_icon = if ns_expanded { "▼" } else { "▶" };
+                    items.push(
+                        ListItem::new(format!("  {} {}", ns_icon, namespace)).style(ns_style),
+                    );
+
+                    // Only show children if namespace is expanded
+                    if ns_expanded {
+                        for (pod_name, containers) in pods {
+                            // Calculate pod selection state
+                            let (pod_enabled, pod_total) = calc_selection_state(containers);
+
+                            let pod_style = if pod_total == 0 {
+                                Style::default().fg(Color::Green)
+                            } else if pod_enabled == 0 {
+                                Style::default().fg(Color::DarkGray)
+                            } else if pod_enabled < pod_total {
+                                Style::default().fg(Color::Gray)
+                            } else {
+                                Style::default().fg(Color::Green)
+                            };
+
+                            // Pod header (indented more)
+                            let phase = &containers[0].phase;
+                            let pod_path = format!("{}/{}/{}", cluster, namespace, pod_name);
+                            let pod_expanded = self.expanded_nodes.contains(&pod_path);
+                            let pod_icon = if pod_expanded { "▼" } else { "▶" };
+                            items.push(
+                                ListItem::new(format!(
+                                    "    {} {} ({})",
+                                    pod_icon, pod_name, phase
+                                ))
+                                .style(pod_style),
+                            );
+
+                            // Only show children if pod is expanded
+                            if pod_expanded {
+                                // Containers (indented most)
+                                for container in containers {
+                                    let enabled = self
+                                        .states
+                                        .get(&container.key)
+                                        .map(|s| s.enabled)
+                                        .unwrap_or(true);
+                                    let checkbox = if enabled { "[x]" } else { "[ ]" };
+
+                                    let text = format!(
+                                        "      {} {}",
+                                        checkbox, container.key.container_name
+                                    );
+
+                                    let style = if enabled {
+                                        Style::default()
+                                    } else {
+                                        Style::default().fg(Color::DarkGray)
+                                    };
+
+                                    items.push(ListItem::new(text).style(style));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::RIGHT))
             .highlight_style(
                 Style::default()
                     .add_modifier(Modifier::REVERSED)
-                    .fg(Color::Yellow),
+                    .fg(Color::Yellow)
+                    .bg(Color::DarkGray),
             )
             .highlight_symbol("→ ");
 
@@ -114,7 +259,9 @@ impl<'a> LogView<'a> {
 
         // Add log line with highlighting if search pattern is active
         if !self.search_pattern.is_empty() {
-            if let Ok(regex) = Regex::new(self.search_pattern) {
+            // Make search case-insensitive by default (prepend (?i))
+            let pattern = format!("(?i){}", self.search_pattern);
+            if let Ok(regex) = Regex::new(&pattern) {
                 let mut last_end = 0;
                 for mat in regex.find_iter(&msg.line) {
                     // Add text before match
@@ -263,10 +410,11 @@ impl Widget for HelpOverlay {
             "  f           - Filter (show only matching lines)",
             "",
             "Navigation:",
-            "  ↑/↓         - Scroll or navigate sidebar",
-            "  PgUp/PgDn   - Page scroll",
-            "  Home/End    - Jump to top/bottom",
-            "  Space       - Toggle pod/container (in sidebar)",
+            "  ↑/↓         - Navigate sidebar (when open) or scroll logs",
+            "  PgUp/PgDn   - Page scroll (logs)",
+            "  Home/End    - Jump to top/bottom (logs)",
+            "  g/G         - Jump to top/bottom (logs, vim-style)",
+            "  Space       - Toggle pod/container or expand/collapse tree node",
             "",
             "Press any key to close",
         ];

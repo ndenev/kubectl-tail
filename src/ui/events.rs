@@ -69,6 +69,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
         }
         (KeyCode::Char('s'), _) => {
             app.sidebar_visible = !app.sidebar_visible;
+            if app.sidebar_visible {
+                // Auto-select first item when opening
+                if app.sidebar_state.selected().is_none() && !app.pods.is_empty() {
+                    app.sidebar_state.select(Some(0));
+                }
+            }
         }
         (KeyCode::Char('p'), _) => {
             app.paused = !app.paused;
@@ -107,14 +113,14 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             app.jump_to_prev_match();
         }
         (KeyCode::Up, _) => {
-            if app.sidebar_visible && app.sidebar_state.selected().is_some() {
+            if app.sidebar_visible {
                 app.sidebar_select_previous();
             } else {
                 app.scroll_up();
             }
         }
         (KeyCode::Down, _) => {
-            if app.sidebar_visible && app.sidebar_state.selected().is_some() {
+            if app.sidebar_visible {
                 app.sidebar_select_next();
             } else {
                 app.scroll_down();
@@ -126,14 +132,14 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
         (KeyCode::PageDown, _) => {
             app.page_down(20);
         }
-        (KeyCode::Home, _) => {
+        (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
             app.scroll_to_top();
         }
-        (KeyCode::End, _) => {
+        (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
             app.scroll_to_bottom();
         }
         (KeyCode::Char(' '), _) if app.sidebar_visible => {
-            app.toggle_pod();
+            app.toggle_sidebar_item();
         }
         _ => {}
     }
@@ -170,7 +176,9 @@ fn handle_filter_mode(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Enter => {
             app.mode = AppMode::Normal;
-            // Filter is applied automatically in filtered_logs()
+            // Reset scroll position when filter is applied
+            app.scroll_to_top();
+            app.auto_scroll = false;
         }
         KeyCode::Char(c) => {
             app.filter_pattern.push(c);

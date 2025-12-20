@@ -1,3 +1,4 @@
+use crate::types::ResourceSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::core::Selector as KubeSelector;
 use ratatui::style::Color;
@@ -58,4 +59,56 @@ pub fn get_crossterm_color(s: &str) -> crossterm::style::Color {
     s.hash(&mut hasher);
     let hash = hasher.finish() as u32;
     colors[(hash % colors.len() as u32) as usize]
+}
+
+/// Parse a resource specification in format:
+/// - context/namespace/kind/name (4 parts)
+/// - namespace/kind/name (3 parts)
+/// - kind/name (2 parts)
+/// - name (1 part - assumed to be a pod)
+pub fn parse_resource_spec(spec: &str) -> Result<ResourceSpec, String> {
+    let parts: Vec<&str> = spec.split('/').collect();
+
+    match parts.len() {
+        1 => {
+            // Just a name - assumed to be a pod
+            Ok(ResourceSpec {
+                context: None,
+                namespace: None,
+                kind: None,
+                name: parts[0].to_string(),
+            })
+        }
+        2 => {
+            // kind/name
+            Ok(ResourceSpec {
+                context: None,
+                namespace: None,
+                kind: Some(parts[0].to_string()),
+                name: parts[1].to_string(),
+            })
+        }
+        3 => {
+            // namespace/kind/name
+            Ok(ResourceSpec {
+                context: None,
+                namespace: Some(parts[0].to_string()),
+                kind: Some(parts[1].to_string()),
+                name: parts[2].to_string(),
+            })
+        }
+        4 => {
+            // context/namespace/kind/name
+            Ok(ResourceSpec {
+                context: Some(parts[0].to_string()),
+                namespace: Some(parts[1].to_string()),
+                kind: Some(parts[2].to_string()),
+                name: parts[3].to_string(),
+            })
+        }
+        _ => Err(format!(
+            "Invalid resource spec '{}': expected 1-4 parts separated by '/'",
+            spec
+        )),
+    }
 }

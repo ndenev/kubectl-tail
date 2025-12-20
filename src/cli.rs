@@ -19,9 +19,9 @@ pub struct Cli {
     #[arg(short = 'c', long)]
     pub container: Option<String>,
 
-    /// Kubernetes contexts for multi-cluster tailing (can specify multiple times)
+    /// Kubernetes context (single value - for multi-cluster use context/namespace/kind/name format)
     #[arg(long = "context")]
-    pub contexts: Vec<String>,
+    pub context: Option<String>,
 
     /// Number of lines to show from the end of the logs on startup
     #[arg(long)]

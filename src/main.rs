@@ -43,6 +43,15 @@ struct TailContext {
     tail: Option<i64>,
 }
 
+/// Configuration for watching pods in a specific context/namespace
+#[derive(Debug, Clone)]
+struct WatchConfig {
+    context: String,
+    namespace: String,
+    label_selectors: Vec<String>,
+    explicit_pods: std::collections::HashSet<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -93,62 +102,65 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Extract contexts from resource specs
+    let mut contexts_to_init = std::collections::HashSet::new();
+
+    // Add explicit --context flag if present
+    if let Some(ctx) = &cli.context {
+        contexts_to_init.insert(ctx.clone());
+    }
+
+    // Parse resource specs to extract contexts
+    for res in &cli.resources {
+        if let Ok(spec) = parse_resource_spec(res)
+            && let Some(ctx) = spec.context
+        {
+            contexts_to_init.insert(ctx);
+        }
+    }
+
     // Initialize clients for all contexts
-    let clients = initialize_clients(cli.contexts.clone()).await?;
-    let namespace = cli.namespace.as_deref().unwrap_or("default").to_string();
+    let clients = initialize_clients(contexts_to_init.into_iter().collect()).await?;
 
     // Parse resources and selectors (common for both modes)
-    let (label_selector_strings, explicit_pods) =
-        parse_resources_and_selectors(&clients, &cli, &namespace).await?;
+    let watch_configs = parse_resources_and_selectors(&clients, &cli).await?;
 
     // Channel for log messages
     let (log_tx, log_rx) = mpsc::channel::<LogMessage>(cli.buffer_size);
 
     // Branch between TUI and stdout mode
     if use_tui {
-        run_tui_mode(
-            clients,
-            namespace,
-            cli,
-            label_selector_strings,
-            explicit_pods,
-            log_tx,
-            log_rx,
-        )
-        .await
+        run_tui_mode(clients, cli, watch_configs, log_tx, log_rx).await
     } else {
-        run_stdout_mode(
-            clients,
-            namespace,
-            cli,
-            label_selector_strings,
-            explicit_pods,
-            log_tx,
-            log_rx,
-        )
-        .await
+        run_stdout_mode(clients, cli, watch_configs, log_tx, log_rx).await
     }
 }
 
-async fn initialize_clients(contexts: Vec<String>) -> anyhow::Result<Vec<(String, Client)>> {
+async fn initialize_clients(context_names: Vec<String>) -> anyhow::Result<Vec<(String, Client)>> {
     let mut clients = Vec::new();
 
-    if contexts.is_empty() {
-        // Use current context
+    if context_names.is_empty() {
+        // Use current context - read kubeconfig to get the actual context name
+        let kubeconfig = config::Kubeconfig::read()?;
+        let current_context_name = kubeconfig
+            .current_context
+            .as_deref()
+            .unwrap_or("default")
+            .to_string();
+
         let config = config::Config::infer().await?;
-        let client = Client::try_from(config.clone())?;
-        // Use cluster URL hostname as context name since current_context is not available in kube::Config
-        let context_name = config.cluster_url.host().unwrap_or("default");
-        info!("Using current context: {}", context_name);
-        clients.push((context_name.to_string(), client));
+        let client = Client::try_from(config)?;
+        info!("Using current context: {}", current_context_name);
+        clients.push((current_context_name, client));
     } else {
-        // Use specified contexts
-        for ctx in contexts {
+        // Use specified contexts - validate they exist
+        for ctx in context_names {
             let config = config::Config::from_kubeconfig(&config::KubeConfigOptions {
                 context: Some(ctx.clone()),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("Context '{}' not found in kubeconfig: {}", ctx, e))?;
             let client = Client::try_from(config)?;
             info!("Initialized client for context: {}", ctx);
             clients.push((ctx, client));
@@ -161,56 +173,149 @@ async fn initialize_clients(contexts: Vec<String>) -> anyhow::Result<Vec<(String
 async fn parse_resources_and_selectors(
     clients: &[(String, Client)],
     cli: &Cli,
-    namespace: &str,
-) -> anyhow::Result<(Vec<String>, std::collections::HashSet<String>)> {
-    let mut resource_specs = vec![];
+) -> anyhow::Result<Vec<WatchConfig>> {
+    use std::collections::{HashMap, HashSet};
+    use types::ResourceSpec;
+
+    // Parse all resource specs
+    let mut parsed_specs = Vec::new();
     for res in &cli.resources {
-        let (typ, nam) = if let Some(slash_pos) = res.find('/') {
-            let typ = res[..slash_pos].to_string();
-            let nam = res[slash_pos + 1..].to_string();
-            (typ, Some(nam))
-        } else {
-            ("pod".to_string(), Some(res.clone()))
-        };
-        resource_specs.push((typ, nam));
+        let spec = parse_resource_spec(res)
+            .map_err(|e| anyhow::anyhow!("Failed to parse resource '{}': {}", res, e))?;
+        parsed_specs.push(spec);
     }
 
-    // Use first client for resource discovery
-    let (_, client) = &clients[0];
-
-    let mut label_selector_strings = Vec::<String>::new();
-    let mut explicit_pods = std::collections::HashSet::new();
-
-    for (typ, nam) in &resource_specs {
-        if let Some(name) = nam {
-            if let Some(sel) = get_selector_from_resource(client, typ, name, namespace).await? {
-                if let Some(sel_str) = selector_to_labels_string(&sel) {
-                    label_selector_strings.push(sel_str);
-                } else {
-                    debug!(
-                        "Selector for resource {}/{} is empty; skipping server-side filtering",
-                        typ, name
-                    );
-                }
-            } else if typ == "pod" {
-                explicit_pods.insert(name.clone());
+    // Validate: if --context or --namespace flags are used, resource specs can't override them
+    if cli.context.is_some() {
+        for spec in &parsed_specs {
+            if spec.context.is_some() {
+                anyhow::bail!(
+                    "Cannot use both --context flag and context in resource spec '{}/{}/{}/{}'",
+                    spec.context.as_ref().unwrap(),
+                    spec.namespace.as_deref().unwrap_or("?"),
+                    spec.kind.as_deref().unwrap_or("pod"),
+                    spec.name
+                );
             }
         }
     }
 
-    if let Some(sel_str) = &cli.selector {
-        label_selector_strings.push(sel_str.clone());
+    if cli.namespace.is_some() {
+        for spec in &parsed_specs {
+            if spec.namespace.is_some() {
+                anyhow::bail!(
+                    "Cannot use both --namespace flag and namespace in resource spec '{}/{}'",
+                    spec.namespace.as_ref().unwrap(),
+                    spec.name
+                );
+            }
+        }
     }
 
-    Ok((label_selector_strings, explicit_pods))
+    // Determine default context and namespace
+    let default_context = if let Some(ctx) = &cli.context {
+        ctx.clone()
+    } else if !clients.is_empty() {
+        clients[0].0.clone()
+    } else {
+        anyhow::bail!("No context available");
+    };
+
+    let default_namespace = cli.namespace.as_deref().unwrap_or("default");
+
+    // Group resources by (context, namespace)
+    let mut grouped: HashMap<(String, String), Vec<ResourceSpec>> = HashMap::new();
+
+    for spec in parsed_specs {
+        let ctx = spec
+            .context
+            .as_deref()
+            .unwrap_or(&default_context)
+            .to_string();
+        let ns = spec
+            .namespace
+            .as_deref()
+            .unwrap_or(default_namespace)
+            .to_string();
+        grouped.entry((ctx, ns)).or_default().push(spec);
+    }
+
+    // Add label selector as a separate entry if provided
+    if cli.selector.is_some() {
+        grouped
+            .entry((default_context.clone(), default_namespace.to_string()))
+            .or_default();
+    }
+
+    // Build WatchConfig for each (context, namespace) group
+    let mut configs = Vec::new();
+
+    for ((ctx, ns), specs) in grouped {
+        // Find the client for this context
+        let client = clients
+            .iter()
+            .find(|(c, _)| c == &ctx)
+            .map(|(_, client)| client)
+            .ok_or_else(|| anyhow::anyhow!("No client found for context '{}'", ctx))?;
+
+        let mut label_selectors = Vec::new();
+        let mut explicit_pods = HashSet::new();
+
+        // Process each resource spec in this group
+        for spec in specs {
+            let kind = spec.kind.as_deref().unwrap_or("pod");
+            let name = &spec.name;
+
+            // Try to get selector - be resilient to errors
+            match get_selector_from_resource(client, kind, name, &ns).await {
+                Ok(Some(sel)) => {
+                    if let Some(sel_str) = selector_to_labels_string(&sel) {
+                        label_selectors.push(sel_str);
+                    } else {
+                        debug!(
+                            "[{}] Selector for {}/{} is empty; skipping",
+                            ctx, kind, name
+                        );
+                    }
+                }
+                Ok(None) => {
+                    if kind == "pod" {
+                        explicit_pods.insert(name.clone());
+                    }
+                }
+                Err(e) => {
+                    // Don't fail - just log and continue
+                    warn!(
+                        "[{}] Could not get selector for {}/{} in namespace {}: {}. Will wait for it to appear.",
+                        ctx, kind, name, ns, e
+                    );
+                }
+            }
+        }
+
+        // Add label selector from CLI if this is the default context/namespace
+        if ctx == default_context
+            && ns == default_namespace
+            && let Some(sel_str) = &cli.selector
+        {
+            label_selectors.push(sel_str.clone());
+        }
+
+        configs.push(WatchConfig {
+            context: ctx,
+            namespace: ns,
+            label_selectors,
+            explicit_pods,
+        });
+    }
+
+    Ok(configs)
 }
 
 async fn run_stdout_mode(
     clients: Vec<(String, Client)>,
-    namespace: String,
     cli: Cli,
-    label_selector_strings: Vec<String>,
-    explicit_pods: std::collections::HashSet<String>,
+    watch_configs: Vec<WatchConfig>,
     log_tx: mpsc::Sender<LogMessage>,
     mut log_rx: mpsc::Receiver<LogMessage>,
 ) -> anyhow::Result<()> {
@@ -250,17 +355,7 @@ async fn run_stdout_mode(
     let handles: Arc<Mutex<HashMap<PodKey, Vec<AbortHandle>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    spawn_all_watchers(
-        clients,
-        namespace,
-        cli,
-        label_selector_strings,
-        explicit_pods,
-        log_tx,
-        handles,
-        None,
-    )
-    .await;
+    spawn_all_watchers(clients, cli, watch_configs, log_tx, handles, None).await;
 
     tokio::signal::ctrl_c().await?;
     Ok(())
@@ -268,10 +363,8 @@ async fn run_stdout_mode(
 
 async fn run_tui_mode(
     clients: Vec<(String, Client)>,
-    namespace: String,
     cli: Cli,
-    label_selector_strings: Vec<String>,
-    explicit_pods: std::collections::HashSet<String>,
+    watch_configs: Vec<WatchConfig>,
     log_tx: mpsc::Sender<LogMessage>,
     log_rx: mpsc::Receiver<LogMessage>,
 ) -> anyhow::Result<()> {
@@ -314,42 +407,56 @@ async fn run_tui_mode(
 
     spawn_all_watchers(
         clients,
-        namespace,
         cli,
-        label_selector_strings,
-        explicit_pods,
+        watch_configs,
         log_tx,
         handles,
         Some(event_tx.clone()),
     )
     .await;
 
-    // Main TUI event loop
+    // Main TUI event loop with render throttling
     let mut should_quit = false;
-    while !should_quit {
-        ui::renderer::render(&mut terminal, &mut app)?;
+    let mut render_interval = tokio::time::interval(std::time::Duration::from_millis(16)); // ~60 FPS
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        if let Some(event) = event_rx.recv().await {
-            match event {
-                AppEvent::Key(key) => {
-                    should_quit = !ui::events::handle_key_event(&mut app, key);
-                }
-                AppEvent::LogMessage(msg) => {
-                    app.add_log(msg);
-                }
-                AppEvent::PodUpdate(update) => match update.event_type {
-                    ui::events::PodEventType::Added | ui::events::PodEventType::Updated => {
-                        app.add_pod(update.info);
+    while !should_quit {
+        tokio::select! {
+            _ = render_interval.tick() => {
+                // Render at fixed interval
+                ui::renderer::render(&mut terminal, &mut app)?;
+            }
+            event = event_rx.recv() => {
+                if let Some(event) = event {
+                    // Process this event
+                    match event {
+                        AppEvent::Key(key) => {
+                            should_quit = !ui::events::handle_key_event(&mut app, key);
+                            // Render immediately after keyboard input for responsiveness
+                            ui::renderer::render(&mut terminal, &mut app)?;
+                        }
+                        AppEvent::LogMessage(msg) => {
+                            app.add_log(msg);
+                            // Batch process additional log messages without blocking
+                            while let Ok(AppEvent::LogMessage(msg)) = event_rx.try_recv() {
+                                app.add_log(msg);
+                            }
+                        }
+                        AppEvent::PodUpdate(update) => match update.event_type {
+                            ui::events::PodEventType::Added | ui::events::PodEventType::Updated => {
+                                app.add_pod(update.info);
+                            }
+                            ui::events::PodEventType::Deleted(key) => {
+                                app.remove_pod(&key);
+                            }
+                        },
+                        AppEvent::Tick => {
+                            app.update_stats();
+                        }
+                        AppEvent::Quit => {
+                            should_quit = true;
+                        }
                     }
-                    ui::events::PodEventType::Deleted(key) => {
-                        app.remove_pod(&key);
-                    }
-                },
-                AppEvent::Tick => {
-                    app.update_stats();
-                }
-                AppEvent::Quit => {
-                    should_quit = true;
                 }
             }
         }
@@ -366,26 +473,35 @@ async fn run_tui_mode(
 #[allow(clippy::too_many_arguments)]
 async fn spawn_all_watchers(
     clients: Vec<(String, Client)>,
-    namespace: String,
     cli: Cli,
-    label_selector_strings: Vec<String>,
-    explicit_pods: std::collections::HashSet<String>,
+    watch_configs: Vec<WatchConfig>,
     log_tx: mpsc::Sender<LogMessage>,
     handles: Arc<Mutex<HashMap<PodKey, Vec<AbortHandle>>>>,
     event_tx: Option<mpsc::Sender<AppEvent>>,
 ) {
-    for (cluster_name, client) in clients {
+    // Group configs by context for easy client lookup
+    let client_map: std::collections::HashMap<_, _> = clients.into_iter().collect();
+
+    for config in watch_configs {
+        let client = match client_map.get(&config.context) {
+            Some(c) => c.clone(),
+            None => {
+                warn!("[{}] No client found for context, skipping", config.context);
+                continue;
+            }
+        };
+
         let ctx = TailContext {
             client: client.clone(),
-            cluster: cluster_name.clone(),
-            namespace: namespace.clone(),
+            cluster: config.context.clone(),
+            namespace: config.namespace.clone(),
             container: cli.container.clone(),
             tx: log_tx.clone(),
             tail: cli.tail,
         };
 
         // Spawn watchers for label selectors
-        for selector in &label_selector_strings {
+        for selector in &config.label_selectors {
             let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), &ctx.namespace);
             let handles = handles.clone();
             let ctx = ctx.clone();
@@ -409,7 +525,7 @@ async fn spawn_all_watchers(
         }
 
         // Spawn watchers for explicit pods
-        for pod_name in &explicit_pods {
+        for pod_name in &config.explicit_pods {
             let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), &ctx.namespace);
             let handles = handles.clone();
             let ctx = ctx.clone();

@@ -11,7 +11,7 @@ pub struct PodKey {
     pub container_name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PodInfo {
     pub key: PodKey,
     pub phase: String,
@@ -35,6 +35,14 @@ pub enum AppMode {
     Help,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum TreeNodeType {
+    Cluster(String),
+    Namespace(String, String), // cluster, namespace
+    Pod(String, String, String), // cluster, namespace, pod
+    Container, // Leaf node
+}
+
 pub struct App {
     // Log buffer - ring buffer with configurable size
     pub log_buffer: VecDeque<LogMessage>,
@@ -47,6 +55,9 @@ pub struct App {
     // UI state
     pub sidebar_visible: bool,
     pub sidebar_state: ListState,
+    pub sidebar_item_keys: Vec<Option<PodKey>>, // Maps list index to container key (None for headers)
+    pub sidebar_item_types: Vec<TreeNodeType>, // Type of each item for collapse/expand
+    pub expanded_nodes: std::collections::HashSet<String>, // Set of expanded node paths
     pub scroll_offset: usize,
     pub auto_scroll: bool,
 
@@ -81,6 +92,9 @@ impl App {
             pod_states: HashMap::new(),
             sidebar_visible: false,
             sidebar_state: ListState::default(),
+            sidebar_item_keys: Vec::new(),
+            sidebar_item_types: Vec::new(),
+            expanded_nodes: std::collections::HashSet::new(),
             scroll_offset: 0,
             auto_scroll: true,
             search_pattern: String::new(),
@@ -135,7 +149,18 @@ impl App {
         if let Some(existing) = self.pods.iter_mut().find(|p| p.key == info.key) {
             *existing = info;
         } else {
-            self.pods.push(info);
+            self.pods.push(info.clone());
+
+            // Auto-expand parent nodes for new pods
+            self.expanded_nodes.insert(info.key.cluster.clone());
+            self.expanded_nodes.insert(format!(
+                "{}/{}",
+                info.key.cluster, info.key.namespace
+            ));
+            self.expanded_nodes.insert(format!(
+                "{}/{}/{}",
+                info.key.cluster, info.key.namespace, info.key.pod_name
+            ));
 
             // Auto-select first pod if sidebar visible and nothing selected
             if self.sidebar_visible
@@ -152,18 +177,53 @@ impl App {
         self.pod_states.remove(key);
     }
 
-    pub fn toggle_pod(&mut self) {
+    pub fn toggle_sidebar_item(&mut self) {
         if let Some(idx) = self.sidebar_state.selected()
-            && let Some(pod) = self.pods.get(idx)
-            && let Some(state) = self.pod_states.get_mut(&pod.key)
+            && let Some(node_type) = self.sidebar_item_types.get(idx)
         {
-            state.enabled = !state.enabled;
+            match node_type {
+                TreeNodeType::Cluster(name) => {
+                    // Toggle expand/collapse
+                    let path = name.clone();
+                    if self.expanded_nodes.contains(&path) {
+                        self.expanded_nodes.remove(&path);
+                    } else {
+                        self.expanded_nodes.insert(path);
+                    }
+                }
+                TreeNodeType::Namespace(cluster, namespace) => {
+                    let path = format!("{}/{}", cluster, namespace);
+                    if self.expanded_nodes.contains(&path) {
+                        self.expanded_nodes.remove(&path);
+                    } else {
+                        self.expanded_nodes.insert(path);
+                    }
+                }
+                TreeNodeType::Pod(cluster, namespace, pod) => {
+                    let path = format!("{}/{}/{}", cluster, namespace, pod);
+                    if self.expanded_nodes.contains(&path) {
+                        self.expanded_nodes.remove(&path);
+                    } else {
+                        self.expanded_nodes.insert(path);
+                    }
+                }
+                TreeNodeType::Container => {
+                    // Toggle container enabled/disabled
+                    if let Some(Some(key)) = self.sidebar_item_keys.get(idx)
+                        && let Some(state) = self.pod_states.get_mut(key)
+                    {
+                        state.enabled = !state.enabled;
+                    }
+                }
+            }
         }
     }
 
     pub fn filtered_logs(&self) -> Vec<&LogMessage> {
         let filter_regex = if !self.filter_pattern.is_empty() {
-            Regex::new(&self.filter_pattern).ok()
+            // Make filter case-insensitive by default (prepend (?i))
+            let pattern = format!("(?i){}", self.filter_pattern);
+            Regex::new(&pattern).ok()
         } else {
             None
         };
@@ -201,7 +261,9 @@ impl App {
             return;
         }
 
-        let Ok(regex) = Regex::new(&self.search_pattern) else {
+        // Make search case-insensitive by default (prepend (?i))
+        let pattern = format!("(?i){}", self.search_pattern);
+        let Ok(regex) = Regex::new(&pattern) else {
             return;
         };
 
@@ -276,12 +338,12 @@ impl App {
     }
 
     pub fn sidebar_select_next(&mut self) {
-        if self.pods.is_empty() {
+        if self.sidebar_item_keys.is_empty() {
             return;
         }
         let i = match self.sidebar_state.selected() {
             Some(i) => {
-                if i >= self.pods.len() - 1 {
+                if i >= self.sidebar_item_keys.len() - 1 {
                     0
                 } else {
                     i + 1
@@ -293,13 +355,13 @@ impl App {
     }
 
     pub fn sidebar_select_previous(&mut self) {
-        if self.pods.is_empty() {
+        if self.sidebar_item_keys.is_empty() {
             return;
         }
         let i = match self.sidebar_state.selected() {
             Some(i) => {
                 if i == 0 {
-                    self.pods.len() - 1
+                    self.sidebar_item_keys.len() - 1
                 } else {
                     i - 1
                 }

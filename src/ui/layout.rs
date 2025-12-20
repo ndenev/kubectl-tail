@@ -19,7 +19,7 @@ pub fn create_layout(area: Rect, sidebar_visible: bool) -> AppLayout {
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(40), // Sidebar
+                Constraint::Length(60), // Sidebar
                 Constraint::Min(1),     // Logs
             ])
             .split(main_chunks[0]);

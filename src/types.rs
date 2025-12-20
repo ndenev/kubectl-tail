@@ -7,3 +7,11 @@ pub struct LogMessage {
     pub line: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ResourceSpec {
+    pub context: Option<String>,
+    pub namespace: Option<String>,
+    pub kind: Option<String>,
+    pub name: String,
+}
