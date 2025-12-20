@@ -112,6 +112,7 @@ pub async fn get_selector_from_resource(
 
 pub async fn spawn_tail_tasks_for_pod(
     client: Client,
+    cluster: String,
     pod_name: String,
     namespace: String,
     container: Option<String>,
@@ -119,7 +120,9 @@ pub async fn spawn_tail_tasks_for_pod(
     tail: Option<i64>,
 ) -> Vec<AbortHandle> {
     if let Some(cont) = container {
-        vec![spawn_tail_task(client, pod_name, namespace, cont, tx, tail)]
+        vec![spawn_tail_task(
+            client, cluster, pod_name, namespace, cont, tx, tail,
+        )]
     } else {
         // Fetch pod to get container names
         let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
@@ -130,6 +133,7 @@ pub async fn spawn_tail_tasks_for_pod(
                     for c in &spec.containers {
                         let handle = spawn_tail_task(
                             client.clone(),
+                            cluster.clone(),
                             pod_name.clone(),
                             namespace.clone(),
                             c.name.clone(),
@@ -151,6 +155,7 @@ pub async fn spawn_tail_tasks_for_pod(
 
 pub fn spawn_tail_task(
     client: Client,
+    cluster: String,
     pod_name: String,
     namespace: String,
     container_name: String,
@@ -239,9 +244,12 @@ pub fn spawn_tail_task(
                                 last_log_time = Some(chrono::Utc::now());
 
                                 let msg = LogMessage {
+                                    cluster: cluster.clone(),
+                                    namespace: namespace.clone(),
                                     pod_name: pod_name.clone(),
                                     container_name: container_name.clone(),
                                     line,
+                                    timestamp: chrono::Utc::now(),
                                 };
                                 if tx.send(msg).await.is_err() {
                                     return;

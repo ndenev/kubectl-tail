@@ -4,11 +4,23 @@ A kubectl plugin for tailing logs from Kubernetes pods with continuous discovery
 
 ## Features
 
+- **Interactive TUI Mode** with minimalist terminal interface (default)
+  - Borderless, full-screen log view with optional sidebar (press `s`)
+  - Sidebar uses simple vertical line divider when visible
+  - Real-time log streaming with color-coded prefixes
+  - Search with highlighting (`/`) and n/N navigation
+  - Separate filter (`f`) to show only matching lines (works on buffer)
+  - Pod/container toggling to control which logs to display (in sidebar)
+  - Status bar showing stats and help hint ("? for help")
+  - Help overlay with keyboard shortcuts (press `?`, fully opaque for easy reading)
+- **Multi-cluster support** - tail logs across multiple Kubernetes clusters simultaneously
 - Tail logs from pods with automatic discovery of new pods
 - Support for multiple resources (e.g., several deployments) and various resource types (pods, deployments, statefulsets, daemonsets, jobs, etc.)
 - Filter by namespace, labels, and resource names
 - Colorized output for easy log differentiation
 - Continuous monitoring with graceful handling of pod restarts and deletions
+- Memory-bounded ring buffer to prevent unbounded growth
+- Backward compatible stdout mode (`--no-tui` flag)
 - Requires at least one resource or label selector to prevent accidental whole-namespace tailing
 
 ## Installation
@@ -65,9 +77,16 @@ kubectl-tail [OPTIONS] [RESOURCES]...
 - `-n, --namespace <NAMESPACE>`: Specify the namespace (default: default)
 - `-l, --selector <SELECTOR>`: Label selector for pods
 - `-c, --container <CONTAINER>`: Container name to tail (if multi-container pod)
-- `--context <CONTEXT>`: Kubernetes context to use
+- `--context <CONTEXTS>`: Kubernetes context to use (can specify multiple times for multi-cluster tailing)
 - `--tail <TAIL>`: Number of lines to show from the end of the logs on startup (-1 for all, 0 for none, default: follow from end)
 - `-v, --verbose`: Enable verbose output for retry messages and pod events
+- `-g, --grep <GREP>`: Filter logs by regex pattern (stdout mode only)
+- `--no-tui`: Disable TUI mode and use stdout output (automatically enabled when piping/redirecting)
+- `--buffer-size <SIZE>`: Maximum buffer size for log messages in TUI mode (default: 10000)
+
+**Note:**
+- TUI mode is automatically disabled when stdout is not a terminal (e.g., when piping to another command or redirecting to a file). You don't need to specify `--no-tui` in these cases.
+- In TUI mode, debug logs are written to `/tmp/kubectl-tail.log` to avoid corrupting the display. Use `tail -f /tmp/kubectl-tail.log` to monitor logs while using the TUI.
 
 ### Examples
 
@@ -101,9 +120,67 @@ Tail logs in a specific namespace:
 kubectl-tail -n production deployment/my-deployment
 ```
 
+Multi-cluster tailing (monitor logs across multiple clusters):
+```bash
+kubectl-tail --context prod-us-east --context prod-eu-west deployment/my-app
+```
+
+Pipe to grep (TUI automatically disabled):
+```bash
+kubectl-tail deployment/my-app | grep ERROR
+```
+
+Force stdout mode even when running in a terminal:
+```bash
+kubectl-tail --no-tui deployment/my-app
+```
+
+### TUI Mode Keyboard Shortcuts
+
+When running in TUI mode (default), the following keyboard shortcuts are available:
+
+**General:**
+- `q` / `Q` / `Ctrl-C` - Quit the application
+- `?` - Toggle help overlay (hint shown in status bar)
+- `s` - Toggle sidebar visibility (off by default)
+- `p` - Pause/Resume log streaming
+- `c` - Clear log buffer
+- `a` - Toggle auto-scroll (automatically scroll to bottom)
+- `t` - Toggle timestamps
+- `x` - Toggle pod/container prefix display
+
+**Navigation:**
+- `↑` / `↓` - Scroll logs or navigate sidebar (when sidebar focused)
+- `PgUp` / `PgDn` - Page up/down in logs
+- `Home` / `End` - Jump to top/bottom of logs
+- `Space` - Toggle selected pod/container on/off (in sidebar)
+
+**Search & Filter:**
+- `/` - Start search (highlights matches in yellow, press Enter to apply)
+- `n` / `N` - Jump to next/previous search match
+- `f` - Filter buffer (show only matching lines, press Enter to apply)
+- `Esc` - Cancel search/filter input
+
+**Note:** Search works on the currently filtered view. You can filter first (e.g., show only ERROR lines), then search within those filtered results.
+
 ## How it works
 
-kubectl-tail collects label selectors from the specified resources and continuously watches for pods in the namespace. It spawns log tailing tasks for matching running pods and automatically starts tailing new pods that match the selectors (e.g., from scaling deployments). Pods are color-coded for easy identification, and tailing stops gracefully when pods are deleted or become non-running.
+kubectl-tail collects label selectors from the specified resources and continuously watches for pods in the namespace(s). It spawns log tailing tasks for matching running pods and automatically starts tailing new pods that match the selectors (e.g., from scaling deployments).
+
+**TUI Mode (default):**
+- Displays logs in a clean, minimalist terminal interface
+- Borderless full-screen log view for maximum content visibility
+- Optional sidebar (press `s`) with vertical line divider showing discovered pods/containers
+- Interactive checkboxes to toggle pod/container log visibility
+- Real-time log streaming with color-coded cluster/pod/container prefixes
+- Memory-bounded ring buffer to prevent unbounded growth (default: 10,000 lines)
+- Status bar shows live statistics, active filters, and help hint
+- Interactive search with multiple modes and keyboard-driven navigation
+
+**Multi-cluster Support:**
+When multiple contexts are specified, kubectl-tail connects to all clusters simultaneously and streams logs with cluster-prefixed identifiers. This is useful for monitoring distributed applications across multiple Kubernetes clusters.
+
+Pods are color-coded for easy identification, and tailing stops gracefully when pods are deleted or become non-running.
 
 ## Contributing
 

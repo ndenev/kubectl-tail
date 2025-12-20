@@ -19,9 +19,9 @@ pub struct Cli {
     #[arg(short = 'c', long)]
     pub container: Option<String>,
 
-    /// Context
-    #[arg(long)]
-    pub context: Option<String>,
+    /// Kubernetes contexts for multi-cluster tailing (can specify multiple times)
+    #[arg(long = "context")]
+    pub contexts: Vec<String>,
 
     /// Number of lines to show from the end of the logs on startup
     #[arg(long)]
@@ -34,4 +34,12 @@ pub struct Cli {
     /// Filter logs by regex pattern
     #[arg(short = 'g', long)]
     pub grep: Option<String>,
+
+    /// Disable TUI mode and use stdout (backward compatibility)
+    #[arg(long)]
+    pub no_tui: bool,
+
+    /// Maximum buffer size for log messages in TUI mode
+    #[arg(long, default_value = "10000")]
+    pub buffer_size: usize,
 }
