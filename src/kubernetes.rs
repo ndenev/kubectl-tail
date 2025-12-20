@@ -1,4 +1,5 @@
 use crate::types::LogMessage;
+use crate::utils::strip_ansi_codes;
 use futures::io::AsyncBufReadExt;
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -243,12 +244,15 @@ pub fn spawn_tail_task(
                                 // Update last log time to current time for reconnection purposes
                                 last_log_time = Some(chrono::Utc::now());
 
+                                // Strip ANSI escape codes to prevent TUI corruption
+                                let clean_line = strip_ansi_codes(&line);
+
                                 let msg = LogMessage {
                                     cluster: cluster.clone(),
                                     namespace: namespace.clone(),
                                     pod_name: pod_name.clone(),
                                     container_name: container_name.clone(),
-                                    line,
+                                    line: clean_line,
                                     timestamp: chrono::Utc::now(),
                                 };
                                 if tx.send(msg).await.is_err() {

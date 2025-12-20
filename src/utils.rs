@@ -2,7 +2,9 @@ use crate::types::ResourceSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::core::Selector as KubeSelector;
 use ratatui::style::Color;
+use regex::Regex;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 /// Render a Kubernetes `LabelSelector` to an API-ready string using kube's typed selector
 /// handling. Returns `None` if the selector is empty or cannot be converted.
@@ -111,4 +113,19 @@ pub fn parse_resource_spec(spec: &str) -> Result<ResourceSpec, String> {
             spec
         )),
     }
+}
+
+/// Strip ANSI escape codes from a string
+/// Uses a cached regex for performance
+pub fn strip_ansi_codes(s: &str) -> String {
+    static ANSI_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = ANSI_REGEX.get_or_init(|| {
+        // This regex matches ANSI escape sequences:
+        // \x1b is the ESC character
+        // Matches CSI sequences: \x1b\[[0-9;]*[a-zA-Z]
+        // Matches OSC sequences: \x1b\][^\x07]*\x07
+        // And other escape sequences
+        Regex::new(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap()
+    });
+    regex.replace_all(s, "").to_string()
 }
