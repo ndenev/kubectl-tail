@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
+use tracing::{debug, warn};
 
 trait HasSelector {
     fn get_selector(&self) -> Option<&LabelSelector>;
@@ -116,12 +117,9 @@ pub async fn spawn_tail_tasks_for_pod(
     container: Option<String>,
     tx: mpsc::Sender<LogMessage>,
     tail: Option<i64>,
-    verbose: bool,
 ) -> Vec<AbortHandle> {
     if let Some(cont) = container {
-        vec![spawn_tail_task(
-            client, pod_name, namespace, cont, tx, tail, verbose,
-        )]
+        vec![spawn_tail_task(client, pod_name, namespace, cont, tx, tail)]
     } else {
         // Fetch pod to get container names
         let api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
@@ -137,7 +135,6 @@ pub async fn spawn_tail_tasks_for_pod(
                             c.name.clone(),
                             tx.clone(),
                             tail,
-                            verbose,
                         );
                         handles.push(handle);
                     }
@@ -145,9 +142,7 @@ pub async fn spawn_tail_tasks_for_pod(
                 handles
             }
             Err(e) => {
-                if verbose {
-                    eprintln!("Failed to get pod {} for containers: {}", pod_name, e);
-                }
+                debug!("Failed to get pod {} for containers: {}", pod_name, e);
                 vec![]
             }
         }
@@ -161,20 +156,18 @@ pub fn spawn_tail_task(
     container_name: String,
     tx: mpsc::Sender<LogMessage>,
     tail: Option<i64>,
-    verbose: bool,
 ) -> AbortHandle {
     let api: Api<Pod> = Api::namespaced(client, &namespace);
 
     let handle = tokio::spawn(async move {
-        if verbose {
-            eprintln!(
-                "Starting to tail logs for pod {}/{} in namespace {}",
-                pod_name, container_name, namespace
-            );
-        }
+        debug!(
+            "Starting to tail logs for pod {}/{} in namespace {}",
+            pod_name, container_name, namespace
+        );
         let mut is_first_attempt = true;
         let mut last_log_time: Option<chrono::DateTime<chrono::Utc>> = None;
-        let mut recent_logs: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(10);
+        let mut recent_logs: std::collections::VecDeque<String> =
+            std::collections::VecDeque::with_capacity(100);
 
         loop {
             let is_reconnection = !is_first_attempt;
@@ -210,11 +203,17 @@ pub fn spawn_tail_task(
             };
             match api.log_stream(&pod_name, &lp_follow).await {
                 Ok(stream) => {
-                    if is_reconnection && verbose {
+                    if is_reconnection {
                         if last_log_time.is_some() {
-                            eprintln!("🔄 Reconnected to {}/{} using sinceTime (no replay)", pod_name, container_name);
+                            debug!(
+                                "Reconnected to {}/{} using sinceTime (no replay)",
+                                pod_name, container_name
+                            );
                         } else {
-                            eprintln!("🔄 Reconnected to {}/{} with no tail (minimal replay)", pod_name, container_name);
+                            debug!(
+                                "Reconnected to {}/{} with no tail (minimal replay)",
+                                pod_name, container_name
+                            );
                         }
                     }
                     let mut line_stream = stream.lines();
@@ -223,15 +222,16 @@ pub fn spawn_tail_task(
                             Ok(line) => {
                                 // Simple deduplication: skip if we've seen this exact log line recently
                                 if is_reconnection && recent_logs.contains(&line) {
-                                    if verbose {
-                                        eprintln!("🔄 Skipping duplicate log line on reconnection for {}/{}", pod_name, container_name);
-                                    }
+                                    debug!(
+                                        "Skipping duplicate log line on reconnection for {}/{}",
+                                        pod_name, container_name
+                                    );
                                     continue;
                                 }
 
-                                // Track recent log lines for deduplication (keep last 10)
+                                // Track recent log lines for deduplication (keep last 100)
                                 recent_logs.push_back(line.clone());
-                                if recent_logs.len() > 10 {
+                                if recent_logs.len() > 100 {
                                     recent_logs.pop_front();
                                 }
 
@@ -248,42 +248,34 @@ pub fn spawn_tail_task(
                                 }
                             }
                             Err(e) => {
-                                if verbose {
-                                    eprintln!(
-                                        "Error reading follow log line from pod {}/{}: {}, retrying",
-                                        pod_name, container_name, e
-                                    );
-                                }
+                                warn!(
+                                    "Error reading follow log line from pod {}/{}: {}, retrying",
+                                    pod_name, container_name, e
+                                );
                                 break;
                             }
                         }
                     }
                     // If stream ended, retry
-                    if verbose {
-                        eprintln!(
-                            "Log stream ended for pod {}/{}, retrying in 5 seconds",
-                            pod_name, container_name
-                        );
-                    }
+                    debug!(
+                        "Log stream ended for pod {}/{}, retrying in 5 seconds",
+                        pod_name, container_name
+                    );
                 }
                 Err(e) => {
                     if let kube::Error::Api(err) = &e
                         && err.code == 404
                     {
-                        if verbose {
-                            eprintln!(
-                                "Pod {}/{} not found (404), stopping tail",
-                                pod_name, container_name
-                            );
-                        }
+                        debug!(
+                            "Pod {}/{} not found (404), stopping tail",
+                            pod_name, container_name
+                        );
                         return;
                     }
-                    if verbose {
-                        eprintln!(
-                            "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",
-                            pod_name, container_name, e
-                        );
-                    }
+                    warn!(
+                        "Failed to get follow log stream for pod {}/{}: {}, retrying in 5 seconds",
+                        pod_name, container_name, e
+                    );
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;

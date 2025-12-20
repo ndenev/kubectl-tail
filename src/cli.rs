@@ -30,4 +30,8 @@ pub struct Cli {
     /// Enable verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Filter logs by regex pattern
+    #[arg(short = 'g', long)]
+    pub grep: Option<String>,
 }
