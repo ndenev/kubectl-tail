@@ -1,5 +1,5 @@
 use crate::types::LogMessage;
-use crate::ui::app::{PodInfo, PodKey, PodState};
+use crate::ui::app::{PodInfo, PodKey, PodState, build_pod_tree};
 use crate::utils::get_color;
 use ratatui::{
     buffer::Buffer,
@@ -35,33 +35,14 @@ impl<'a> StatefulWidget for PodList<'a> {
     type State = ratatui::widgets::ListState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        use std::collections::BTreeMap;
-
-        // Group pods by cluster -> namespace -> pod -> containers
-        let mut tree: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&PodInfo>>>> =
-            BTreeMap::new();
-
-        for pod in self.pods {
-            tree.entry(pod.key.cluster.clone())
-                .or_default()
-                .entry(pod.key.namespace.clone())
-                .or_default()
-                .entry(pod.key.pod_name.clone())
-                .or_default()
-                .push(pod);
-        }
+        let tree = build_pod_tree(self.pods);
 
         // Helper function to calculate selection state for a group of containers
         let calc_selection_state = |containers: &[&PodInfo]| -> (usize, usize) {
             let total = containers.len();
             let enabled = containers
                 .iter()
-                .filter(|c| {
-                    self.states
-                        .get(&c.key)
-                        .map(|s| s.enabled)
-                        .unwrap_or(true)
-                })
+                .filter(|c| self.states.get(&c.key).map(|s| s.enabled).unwrap_or(true))
                 .count();
             (enabled, total)
         };
@@ -83,23 +64,27 @@ impl<'a> StatefulWidget for PodList<'a> {
 
             // Determine cluster style based on selection state
             let cluster_style = if cluster_total == 0 {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else if cluster_enabled == 0 {
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
             } else if cluster_enabled < cluster_total {
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             };
 
             // Cluster header
-            let cluster_expanded = self.expanded_nodes.contains(cluster);
+            let cluster_expanded = self.expanded_nodes.contains(*cluster);
             let cluster_icon = if cluster_expanded { "▼" } else { "▶" };
-            items.push(
-                ListItem::new(format!("{} {}", cluster_icon, cluster)).style(cluster_style),
-            );
+            items.push(ListItem::new(format!("{} {}", cluster_icon, cluster)).style(cluster_style));
 
             // Only show children if cluster is expanded
             if cluster_expanded {
@@ -114,15 +99,21 @@ impl<'a> StatefulWidget for PodList<'a> {
                     }
 
                     let ns_style = if ns_total == 0 {
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD)
                     } else if ns_enabled == 0 {
                         Style::default()
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::BOLD)
                     } else if ns_enabled < ns_total {
-                        Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD)
                     };
 
                     // Namespace header (indented)
@@ -155,11 +146,8 @@ impl<'a> StatefulWidget for PodList<'a> {
                             let pod_expanded = self.expanded_nodes.contains(&pod_path);
                             let pod_icon = if pod_expanded { "▼" } else { "▶" };
                             items.push(
-                                ListItem::new(format!(
-                                    "    {} {} ({})",
-                                    pod_icon, pod_name, phase
-                                ))
-                                .style(pod_style),
+                                ListItem::new(format!("    {} {} ({})", pod_icon, pod_name, phase))
+                                    .style(pod_style),
                             );
 
                             // Only show children if pod is expanded

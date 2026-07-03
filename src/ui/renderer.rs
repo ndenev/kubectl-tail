@@ -1,9 +1,9 @@
-use crate::ui::app::{App, PodInfo};
+use crate::ui::app::App;
 use crate::ui::layout::create_layout;
 use crate::ui::widgets::{HelpOverlay, LogView, PodList, StatusBar};
 use ratatui::{Frame, Terminal, backend::Backend};
 
-pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> std::io::Result<()> {
+pub fn render<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), B::Error> {
     terminal.draw(|f| render_frame(f, app))?;
     Ok(())
 }
@@ -13,64 +13,7 @@ fn render_frame(f: &mut Frame, app: &mut App) {
 
     // Render sidebar if visible
     if app.sidebar_visible {
-        // Build mapping from list index to container key
-        use std::collections::BTreeMap;
-        let mut tree: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&PodInfo>>>> =
-            BTreeMap::new();
-
-        for pod in &app.pods {
-            tree.entry(pod.key.cluster.clone())
-                .or_default()
-                .entry(pod.key.namespace.clone())
-                .or_default()
-                .entry(pod.key.pod_name.clone())
-                .or_default()
-                .push(pod);
-        }
-
-        // Build the item keys and types mapping
-        app.sidebar_item_keys.clear();
-        app.sidebar_item_types.clear();
-        for (cluster, namespaces) in &tree {
-            app.sidebar_item_keys.push(None); // Cluster header
-            app.sidebar_item_types
-                .push(crate::ui::app::TreeNodeType::Cluster(cluster.clone()));
-
-            // Only show children if cluster is expanded
-            if app.expanded_nodes.contains(cluster) {
-                for (namespace, pods) in namespaces {
-                    app.sidebar_item_keys.push(None); // Namespace header
-                    app.sidebar_item_types.push(crate::ui::app::TreeNodeType::Namespace(
-                        cluster.clone(),
-                        namespace.clone(),
-                    ));
-
-                    // Only show children if namespace is expanded
-                    let ns_path = format!("{}/{}", cluster, namespace);
-                    if app.expanded_nodes.contains(&ns_path) {
-                        for (pod_name, containers) in pods {
-                            app.sidebar_item_keys.push(None); // Pod header
-                            app.sidebar_item_types.push(crate::ui::app::TreeNodeType::Pod(
-                                cluster.clone(),
-                                namespace.clone(),
-                                pod_name.clone(),
-                            ));
-
-                            // Only show children if pod is expanded
-                            let pod_path = format!("{}/{}/{}", cluster, namespace, pod_name);
-                            if app.expanded_nodes.contains(&pod_path) {
-                                for container in containers {
-                                    app.sidebar_item_keys.push(Some(container.key.clone())); // Container (selectable)
-                                    app.sidebar_item_types
-                                        .push(crate::ui::app::TreeNodeType::Container);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        app.rebuild_sidebar_items();
         let pod_list = PodList::new(&app.pods, &app.pod_states, &app.expanded_nodes);
         f.render_stateful_widget(pod_list, layout.sidebar, &mut app.sidebar_state);
     }

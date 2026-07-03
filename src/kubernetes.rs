@@ -4,6 +4,7 @@ use futures::io::AsyncBufReadExt;
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use kube::{Api, Client, api::LogParams};
 use std::fmt::Debug;
 use std::time::Duration;
@@ -171,7 +172,7 @@ pub fn spawn_tail_task(
             pod_name, container_name, namespace
         );
         let mut is_first_attempt = true;
-        let mut last_log_time: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut last_log_time: Option<Timestamp> = None;
         let mut recent_logs: std::collections::VecDeque<String> =
             std::collections::VecDeque::with_capacity(100);
 
@@ -190,7 +191,7 @@ pub fn spawn_tail_task(
                 // Reconnection: use sinceTime to avoid replay
                 if let Some(since_time) = last_log_time {
                     // Add 1 second to avoid getting the exact same log line again
-                    let since_time_plus = since_time + chrono::Duration::seconds(1);
+                    let since_time_plus = since_time + SignedDuration::from_secs(1);
                     LogParams {
                         follow: true,
                         container: Some(container_name.clone()),
@@ -242,7 +243,7 @@ pub fn spawn_tail_task(
                                 }
 
                                 // Update last log time to current time for reconnection purposes
-                                last_log_time = Some(chrono::Utc::now());
+                                last_log_time = Some(Timestamp::now());
 
                                 // Strip ANSI escape codes to prevent TUI corruption
                                 let clean_line = strip_ansi_codes(&line);

@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::{TryStreamExt, stream::StreamExt};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::{api::core::v1::Pod, jiff::Timestamp};
 use kube::runtime::watcher::{Config as WatcherConfig, Event, watcher};
 use kube::{Api, Client, ResourceExt, config};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -188,10 +188,10 @@ async fn parse_resources_and_selectors(
     // Validate: if --context or --namespace flags are used, resource specs can't override them
     if cli.context.is_some() {
         for spec in &parsed_specs {
-            if spec.context.is_some() {
+            if let Some(context) = &spec.context {
                 anyhow::bail!(
                     "Cannot use both --context flag and context in resource spec '{}/{}/{}/{}'",
-                    spec.context.as_ref().unwrap(),
+                    context,
                     spec.namespace.as_deref().unwrap_or("?"),
                     spec.kind.as_deref().unwrap_or("pod"),
                     spec.name
@@ -202,10 +202,10 @@ async fn parse_resources_and_selectors(
 
     if cli.namespace.is_some() {
         for spec in &parsed_specs {
-            if spec.namespace.is_some() {
+            if let Some(namespace) = &spec.namespace {
                 anyhow::bail!(
                     "Cannot use both --namespace flag and namespace in resource spec '{}/{}'",
-                    spec.namespace.as_ref().unwrap(),
+                    namespace,
                     spec.name
                 );
             }
@@ -727,10 +727,10 @@ fn format_age(pod: &Pod) -> String {
         .creation_timestamp
         .as_ref()
         .map(|t| {
-            let now = chrono::Utc::now();
+            let now = Timestamp::now();
             let created = t.0;
-            let duration = now.signed_duration_since(created);
-            let total_secs = duration.num_seconds();
+            let duration = now.duration_since(created);
+            let total_secs = duration.as_secs();
             if total_secs < 60 {
                 format!("{}s", total_secs)
             } else if total_secs < 3600 {

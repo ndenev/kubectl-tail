@@ -1,7 +1,7 @@
 use crate::types::LogMessage;
 use ratatui::widgets::ListState;
 use regex::Regex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct PodKey {
@@ -38,9 +38,27 @@ pub enum AppMode {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TreeNodeType {
     Cluster(String),
-    Namespace(String, String), // cluster, namespace
+    Namespace(String, String),   // cluster, namespace
     Pod(String, String, String), // cluster, namespace, pod
-    Container, // Leaf node
+    Container,                   // Leaf node
+}
+
+pub type PodTree<'a> = BTreeMap<&'a str, BTreeMap<&'a str, BTreeMap<&'a str, Vec<&'a PodInfo>>>>;
+
+pub fn build_pod_tree(pods: &[PodInfo]) -> PodTree<'_> {
+    let mut tree: PodTree<'_> = BTreeMap::new();
+
+    for pod in pods {
+        tree.entry(pod.key.cluster.as_str())
+            .or_default()
+            .entry(pod.key.namespace.as_str())
+            .or_default()
+            .entry(pod.key.pod_name.as_str())
+            .or_default()
+            .push(pod);
+    }
+
+    tree
 }
 
 pub struct App {
@@ -56,7 +74,7 @@ pub struct App {
     pub sidebar_visible: bool,
     pub sidebar_state: ListState,
     pub sidebar_item_keys: Vec<Option<PodKey>>, // Maps list index to container key (None for headers)
-    pub sidebar_item_types: Vec<TreeNodeType>, // Type of each item for collapse/expand
+    pub sidebar_item_types: Vec<TreeNodeType>,  // Type of each item for collapse/expand
     pub expanded_nodes: std::collections::HashSet<String>, // Set of expanded node paths
     pub scroll_offset: usize,
     pub auto_scroll: bool,
@@ -153,10 +171,8 @@ impl App {
 
             // Auto-expand parent nodes for new pods
             self.expanded_nodes.insert(info.key.cluster.clone());
-            self.expanded_nodes.insert(format!(
-                "{}/{}",
-                info.key.cluster, info.key.namespace
-            ));
+            self.expanded_nodes
+                .insert(format!("{}/{}", info.key.cluster, info.key.namespace));
             self.expanded_nodes.insert(format!(
                 "{}/{}/{}",
                 info.key.cluster, info.key.namespace, info.key.pod_name
@@ -217,6 +233,49 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn rebuild_sidebar_items(&mut self) {
+        let mut keys = Vec::new();
+        let mut types = Vec::new();
+
+        for (cluster, namespaces) in build_pod_tree(&self.pods) {
+            keys.push(None);
+            types.push(TreeNodeType::Cluster(cluster.to_string()));
+
+            if self.expanded_nodes.contains(cluster) {
+                for (namespace, pods) in namespaces {
+                    keys.push(None);
+                    types.push(TreeNodeType::Namespace(
+                        cluster.to_string(),
+                        namespace.to_string(),
+                    ));
+
+                    let ns_path = format!("{}/{}", cluster, namespace);
+                    if self.expanded_nodes.contains(&ns_path) {
+                        for (pod_name, containers) in pods {
+                            keys.push(None);
+                            types.push(TreeNodeType::Pod(
+                                cluster.to_string(),
+                                namespace.to_string(),
+                                pod_name.to_string(),
+                            ));
+
+                            let pod_path = format!("{}/{}/{}", cluster, namespace, pod_name);
+                            if self.expanded_nodes.contains(&pod_path) {
+                                for container in containers {
+                                    keys.push(Some(container.key.clone()));
+                                    types.push(TreeNodeType::Container);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.sidebar_item_keys = keys;
+        self.sidebar_item_types = types;
     }
 
     pub fn filtered_logs(&self) -> Vec<&LogMessage> {
